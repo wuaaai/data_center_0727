@@ -11,8 +11,9 @@ node_modules/
 data/
 output/
 
-# ── MinerU 核心输出 ──
+# ── MinerU 核心输出 + 运行时临时配置 ──
 mineru_core/output/
+mineru_core/.mineru_resolved.json
 
 # ── 模型文件（体积巨大，运行时下载）──
 modelscope/

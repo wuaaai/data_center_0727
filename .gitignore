@@ -13,6 +13,7 @@ node_modules/
 /data_processing_center/data/
 /data_processing_center/output/
 /data_processing_center/mineru_core/output/
+/data_processing_center/mineru_core/.mineru_resolved.json
 
 # ── 模型文件（体积巨大，运行时下载到本地）──
 /modelscope/
