@@ -51,3 +51,6 @@ if sys.platform == "win32":
 else:
     _default_site = str(PROJECT_ROOT / ".venv" / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}" / "site-packages")
 MINERU_SITE_PACKAGES = os.getenv("MINERU_SITE_PACKAGES", _default_site)
+
+# ── MinerU 模型服务地址（8001 后端通过 HTTP 调用 8003）──
+MINERU_SERVICE_URL = os.getenv("MINERU_SERVICE_URL", "http://127.0.0.1:8003")

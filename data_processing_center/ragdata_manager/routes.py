@@ -38,6 +38,7 @@ from .config import (
     MINERU_BASE,
     MINERU_VENV_PYTHON,
     MINERU_SITE_PACKAGES,
+    MINERU_SERVICE_URL,
 )
 
 router = APIRouter(tags=["知识库数据管理"])
@@ -146,7 +147,7 @@ def _process_document_background(job_id: str, input_path: Path):
         last_health_progress = ""
         for attempt in range(180):  # 最多等 3 分钟
             try:
-                req = urllib.request.Request("http://127.0.0.1:8003/api/health")
+                req = urllib.request.Request(f"{MINERU_SERVICE_URL}/api/health")
                 with urllib.request.urlopen(req, timeout=5) as resp:
                     data = _json.loads(resp.read().decode("utf-8"))
                     if data.get("model_loaded"):
@@ -180,7 +181,7 @@ def _process_document_background(job_id: str, input_path: Path):
         body = body_head + file_bytes + body_tail
         content_type = f"multipart/form-data; boundary={boundary}"
         req = urllib.request.Request(
-            "http://127.0.0.1:8003/api/parse",
+            f"{MINERU_SERVICE_URL}/api/parse",
             data=body,
             headers={"Content-Type": content_type},
         )
@@ -207,7 +208,7 @@ def _process_document_background(job_id: str, input_path: Path):
                 raise TimeoutError(f"文档处理超时 (>{actual_timeout}秒)")
             time.sleep(3)
             try:
-                req = urllib.request.Request(f"http://127.0.0.1:8003/api/parse/{mineru_task_id}")
+                req = urllib.request.Request(f"{MINERU_SERVICE_URL}/api/parse/{mineru_task_id}")
                 with urllib.request.urlopen(req, timeout=10) as resp:
                     data = _json.loads(resp.read().decode("utf-8"))
                 consecutive_errors = 0  # 成功则重置错误计数
@@ -652,10 +653,10 @@ async def update_region_permission(request: Request):
 
 @router.get("/model-service/status", summary="获取模型服务状态")
 async def model_service_status():
-    """代理请求 MinerU 模型服务(8003)的状态（绕过 httpx 依赖，仅用标准库）。"""
+    """代理请求 MinerU 模型服务的状态（绕过 httpx 依赖，仅用标准库）。"""
     import urllib.request, json
     try:
-        req = urllib.request.Request("http://127.0.0.1:8003/api/status")
+        req = urllib.request.Request(f"{MINERU_SERVICE_URL}/api/status")
         with urllib.request.urlopen(req, timeout=5) as resp:
             return json.loads(resp.read().decode("utf-8"))
     except Exception:
@@ -792,7 +793,7 @@ async def delete_job(job_id: str):
     if mineru_tid and job.get("status") in ("processing", "queued"):
         try:
             import urllib.request
-            req = urllib.request.Request(f"http://127.0.0.1:8003/api/queue/{mineru_tid}/cancel", method="POST")
+            req = urllib.request.Request(f"{MINERU_SERVICE_URL}/api/queue/{mineru_tid}/cancel", method="POST")
             urllib.request.urlopen(req, timeout=5)
         except Exception:
             pass  # 取消失败不影响删除（任务可能已不存在）
