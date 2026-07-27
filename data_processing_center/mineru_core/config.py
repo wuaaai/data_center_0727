@@ -14,17 +14,19 @@ OUTPUT_DIR = BASE_DIR / "output"
 MODELS_DIR = BASE_DIR / "models"
 
 # === minerU 本地模型配置 ===
-# mineru.json 中 models-dir.pipeline 使用相对路径 ./modelscope/models/...
-# config.py 启动时自动解析为绝对路径并写回 mineru.json
+# mineru.json 中 models-dir.pipeline 使用相对路径，运行时由本文件解析为绝对路径（不写回文件）
 _MINERU_CONFIG_PATH = BASE_DIR / "mineru.json"
+_TEMP_CONFIG = None
 if _MINERU_CONFIG_PATH.exists():
     import json as _json
     _config_data = _json.loads(_MINERU_CONFIG_PATH.read_text(encoding="utf-8"))
     _pipeline = _config_data.get("models-dir", {}).get("pipeline", "")
     if _pipeline and not Path(_pipeline).is_absolute():
-        # 相对路径 → 基于 BASE_DIR 解析为绝对路径
+        # 相对路径 → 基于 BASE_DIR 解析，写入临时文件避免污染源代码中的相对路径
         _config_data["models-dir"]["pipeline"] = str((BASE_DIR / _pipeline).resolve())
-        _MINERU_CONFIG_PATH.write_text(_json.dumps(_config_data, indent=4, ensure_ascii=False), encoding="utf-8")
+        _TEMP_CONFIG = BASE_DIR / ".mineru_resolved.json"
+        _TEMP_CONFIG.write_text(_json.dumps(_config_data, indent=4, ensure_ascii=False), encoding="utf-8")
+        _MINERU_CONFIG_PATH = _TEMP_CONFIG
 os.environ["MINERU_TOOLS_CONFIG_JSON"] = str(_MINERU_CONFIG_PATH)
 os.environ["MINERU_MODEL_SOURCE"] = "local"
 

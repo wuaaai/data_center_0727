@@ -31,7 +31,7 @@
         }
     },
     "models-dir": {
-        "pipeline": "./modelscope/models/OpenDataLab/PDF-Extract-Kit-1___0",
+        "pipeline": "E:\\Develop_docu\\sql_0722_center\\data_processing_center\\mineru_core\\modelscope\\models\\OpenDataLab\\PDF-Extract-Kit-1___0",
         "_vlm_comment": "VLM 模型路径已注释，使用 pipeline 模式",
         "_vlm": "./models/MinerU2___5-Pro-2605-1___2B"
     },

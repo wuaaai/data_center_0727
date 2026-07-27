@@ -85,7 +85,9 @@ class ModelManager:
         """预热：加载 MinerU 模型到内存（仅触发 lazy-load 初始化，不处理完整文档）。"""
         self._model_loading = True
         try:
-            os.environ["MINERU_TOOLS_CONFIG_JSON"] = str(_MINERU_CORE / "mineru.json")
+            # 导入 mineru_core/config.py 来设置 MINERU_TOOLS_CONFIG_JSON（自动解析相对路径）
+            from config import _MINERU_CONFIG_PATH
+            os.environ["MINERU_TOOLS_CONFIG_JSON"] = os.environ.get("MINERU_TOOLS_CONFIG_JSON", str(_MINERU_CONFIG_PATH))
             os.environ["MINERU_MODEL_SOURCE"] = "local"
             from mineru.backend.pipeline.model_init import (
                 HybridModelSingleton,
