@@ -64,4 +64,7 @@ async def index():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="127.0.0.1", port=8003)
+    import os
+    port = int(os.getenv("MINERU_PORT", "8003"))
+    host = os.getenv("MINERU_HOST", "127.0.0.1")
+    uvicorn.run(app, host=host, port=port)
