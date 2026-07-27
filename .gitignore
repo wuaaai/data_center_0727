@@ -1,0 +1,59 @@
+# ── 虚拟环境 ──
+.venv/
+venv/
+env/
+**/.venv/
+
+# ── 前端依赖 ──
+node_modules/
+**/node_modules/
+
+# ── 运行时数据目录（上传文件 + 处理输出 + 中间产物）──
+data/
+output/
+**/data/
+**/output/
+
+# ── 模型文件（体积巨大，运行时下载到本地）──
+models/
+modelscope/
+**/models/
+**/modelscope/
+
+# ── Python 缓存 ──
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.eggs/
+
+# ── IDE ──
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ── 环境变量 / 敏感配置 ──
+.env
+.env.*
+*.local.json
+
+# ── 系统文件 ──
+.DS_Store
+Thumbs.db
+
+# ── 运行时持久化（由程序自动生成）──
+metadata_store.json
+_jobs.json
+
+# ── 日志文件 ──
+*.log
+*.log.bak
+
+# ── 备份压缩包 ──
+*.zip
+*.rar
+*.7z
+
+# ── Claude 内部目录 ──
+.claude/

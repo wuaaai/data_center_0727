@@ -1,0 +1,62 @@
+:root {
+  color-scheme: light;
+  font-family: "Plus Jakarta Sans", "PingFang SC", "Microsoft YaHei", sans-serif;
+  --bg-main: #eef3fb;
+  --text-main: #0f172a;
+  --text-muted: #64748b;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  margin: 0;
+  height: 100%;
+}
+
+body {
+  background:
+    radial-gradient(circle at top left, rgba(82, 99, 255, 0.12), transparent 28%),
+    radial-gradient(circle at right top, rgba(34, 197, 94, 0.12), transparent 22%),
+    linear-gradient(180deg, #f7f9fd 0%, var(--bg-main) 100%);
+  color: var(--text-main);
+  overflow: hidden;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+::selection {
+  background: rgba(82, 99, 255, 0.16);
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.28);
+  border-radius: 999px;
+}
+
+:where(.el-button) {
+  border-radius: 14px;
+}
+
+:where(.el-input__wrapper, .el-textarea__inner, .el-select__wrapper) {
+  box-shadow: none;
+}
+
+@media (max-width: 1024px) {
+  body {
+    overflow: auto;
+  }
+}

@@ -1,0 +1,160 @@
+{% extends "base.html" %}
+{% block content %}
+
+{% if not embed %}
+<section class="upload-section">
+    <h2>上传文档</h2>
+    <form id="upload-form" enctype="multipart/form-data">
+        <div class="drop-zone" id="drop-zone">
+            <p>拖拽文件到此处，或点击选择（支持多文件）</p>
+            <p class="hint">支持 PDF / DOCX / DOC，最大 200MB / 文件，每批最多 3 个并发处理</p>
+            <input type="file" id="file-input" accept=".pdf,.docx,.doc" multiple hidden>
+            <input type="file" id="folder-input" accept=".pdf,.docx,.doc" webkitdirectory hidden>
+            <button type="button" id="select-btn">选择文件</button>
+            <button type="button" id="folder-btn">选择文件夹</button>
+        </div>
+        <div id="selected-files" class="selected-files" style="display:none">
+            <h3>待上传文件（<span id="file-count">0</span> 个）</h3>
+            <ul id="file-list"></ul>
+            <div class="upload-actions">
+                <button type="button" id="clear-all-btn" class="btn btn-sm">清空列表</button>
+                <button type="submit" id="upload-btn" class="btn btn-primary">开始处理全部</button>
+            </div>
+        </div>
+    </form>
+    <div id="upload-status" class="upload-status" style="display:none"></div>
+</section>
+
+<!-- 直接入库：上传手工编辑好的 DOCX -->
+<section class="direct-upload-section">
+    <div class="direct-upload-bar">
+        <span>📝 已有编辑好的 DOCX？</span>
+        <span class="hint" style="font-size:0.8rem">跳过 MinerU 处理，直接上传并入库</span>
+        <input type="file" id="direct-upload-input" accept=".docx,.doc" hidden>
+        <button type="button" id="direct-upload-btn" class="btn btn-sm btn-success">直接上传（跳过处理）</button>
+        <span id="direct-upload-status" style="font-size:0.85rem;color:#888;"></span>
+    </div>
+</section>
+{% endif %}
+
+<section class="jobs-section">
+    <!-- 标题栏 -->
+    <div class="section-header">
+        <h2>{% if embed %}📄{% else %}文档列表{% endif %}</h2>
+        <div id="batch-actions" class="batch-actions" style="display:none">
+            <label><input type="checkbox" id="select-all" onchange="toggleSelectAll(this)"> 全选</label>
+            <span>已选 <strong id="batch-count">0</strong> 项</span>
+            <button id="batch-ingest-btn" class="btn btn-success btn-sm" onclick="batchIngest()">批量入库</button>
+            <button id="batch-download-btn" class="btn btn-primary btn-sm" onclick="batchDownload()">批量下载</button>
+            <button id="batch-delete-btn" class="btn btn-danger btn-sm" onclick="batchDelete()">批量删除</button>
+            <span id="batch-status" class="batch-status"></span>
+        </div>
+    </div>
+
+    <!-- 统计概览（可点击筛选） -->
+    <div id="stats-bar" class="stats-bar" style="display:none">
+        <a class="stat-item stat-all" href="/jobs{% if embed %}?embed=1{% endif %}" data-status="">
+            总计 <strong id="stat-total">0</strong>
+        </a>
+        <a class="stat-item stat-queued" href="/jobs?status=queued{% if embed %}&embed=1{% endif %}" data-status="queued">
+            排队 <strong id="stat-queued">0</strong>
+        </a>
+        <a class="stat-item stat-processing" href="/jobs?status=processing{% if embed %}&embed=1{% endif %}" data-status="processing">
+            处理中 <strong id="stat-processing">0</strong>
+        </a>
+        <a class="stat-item stat-completed" href="/jobs?status=completed{% if embed %}&embed=1{% endif %}" data-status="completed">
+            已完成 <strong id="stat-completed">0</strong>
+        </a>
+        <a class="stat-item stat-failed" href="/jobs?status=failed{% if embed %}&embed=1{% endif %}" data-status="failed">
+            失败 <strong id="stat-failed">0</strong>
+        </a>
+        <a class="stat-item stat-ingested" href="/jobs?status=ingested{% if embed %}&embed=1{% endif %}" data-status="ingested">
+            已入库 <strong id="stat-ingested">0</strong>
+        </a>
+        {% if status_filter %}<span class="filter-tag">当前筛选: <strong>{{ status_filter }}</strong> <a href="/jobs{% if embed %}?embed=1{% endif %}">✕ 清除</a></span>{% endif %}
+    </div>
+
+    <div id="jobs-list">
+        {% if jobs %}
+            {% for job in jobs %}
+            <div class="job-card" id="job-{{ job.id }}">
+                <div class="job-info">
+                    <span class="job-seq">{{ (page - 1) * per_page + loop.index }}</span>
+                    <input type="checkbox" class="job-checkbox" data-job-id="{{ job.id }}" data-status="{{ job.status }}" onchange="updateBatchCount()">
+                    <span class="job-filename" title="{{ job.filename }}">{{ job.filename }}</span>
+                    <span class="job-status status-{{ job.status }}">{{ job.status }}</span>
+                    <span class="job-progress">{{ job.progress }}</span>
+                </div>
+                <div class="job-meta">
+                    {% if job.chunk_count %}<span>{{ job.chunk_count }} 块</span>{% endif %}
+                    {% if job.processing_time %}<span>{{ job.processing_time }}s</span>{% endif %}
+                    {% if job.modify_count %}<span class="meta-modified">已修改 {{ job.modify_count }} 次</span>{% endif %}
+                </div>
+                <div class="job-actions">
+                    {% if job.status in ('completed', 'ingested') %}
+                    <button class="btn btn-sm btn-warning" onclick="showReplaceDialog('{{ job.id }}')" title="上传修改版 DOCX">替换</button>
+                    {% endif %}
+                    {% if job.status == 'completed' %}
+                    <button class="btn btn-sm btn-success" onclick="singleIngest('{{ job.id }}', this)">入库</button>
+                    <a href="/api/jobs/{{ job.id }}/download" class="btn btn-sm">下载</a>
+                    <a href="/jobs/{{ job.id }}{% if embed %}?embed=1{% endif %}" class="btn btn-sm">预览</a>
+                    {% elif job.status == 'ingesting' %}
+                    <span class="ingesting-indicator">入库中...</span>
+                    {% elif job.status == 'ingested' %}
+                    <span class="ingested-indicator">已入库</span>
+                    <button class="btn btn-sm btn-warning" onclick="unloadFromKB('{{ job.id }}', this)">移除</button>
+                    <a href="/api/jobs/{{ job.id }}/download" class="btn btn-sm">下载</a>
+                    <a href="/jobs/{{ job.id }}{% if embed %}?embed=1{% endif %}" class="btn btn-sm">预览</a>
+                    {% elif job.status == 'failed' %}
+                    <a href="/jobs/{{ job.id }}{% if embed %}?embed=1{% endif %}" class="btn btn-sm">查看错误</a>
+                    {% else %}
+                    <a href="/jobs/{{ job.id }}{% if embed %}?embed=1{% endif %}" class="btn btn-sm">查看进度</a>
+                    {% endif %}
+                    <button class="btn btn-sm btn-danger" onclick="deleteJob('{{ job.id }}')">删除</button>
+                </div>
+            </div>
+            {% endfor %}
+        {% else %}
+            <p class="empty">
+                {% if status_filter %}暂无 {{ status_filter }} 状态的任务{% else %}暂无任务，上传文档开始处理。{% endif %}
+            </p>
+        {% endif %}
+    </div>
+
+    <!-- 分页控件 -->
+    {% if total_pages > 1 %}
+    <div class="pagination">
+        {% if page > 1 %}
+        <a class="page-btn" href="/jobs?page={{ page - 1 }}&per_page={{ per_page }}{% if status_filter %}&status={{ status_filter }}{% endif %}{% if embed %}&embed=1{% endif %}">上一页</a>
+        {% else %}
+        <span class="page-btn disabled">上一页</span>
+        {% endif %}
+
+        <span class="page-info">第 {{ page }} / {{ total_pages }} 页，共 {{ total }} 条</span>
+
+        {% if page < total_pages %}
+        <a class="page-btn" href="/jobs?page={{ page + 1 }}&per_page={{ per_page }}{% if status_filter %}&status={{ status_filter }}{% endif %}{% if embed %}&embed=1{% endif %}">下一页</a>
+        {% else %}
+        <span class="page-btn disabled">下一页</span>
+        {% endif %}
+    </div>
+    {% endif %}
+</section>
+
+{% if not embed %}
+<!-- 知识库概览 -->
+<section class="jobs-section" id="knowledge-section">
+    <div class="section-header">
+        <h2>知识库概览</h2>
+        <button class="btn btn-sm" onclick="loadKnowledge()">刷新</button>
+    </div>
+    <div id="knowledge-content">
+        <p class="empty" id="kb-loading">加载中...</p>
+    </div>
+</section>
+{% endif %}
+
+<!-- 替换文件对话框（隐藏的 file input） -->
+<input type="file" id="replace-file-input" accept=".docx,.doc" hidden>
+
+{% endblock %}

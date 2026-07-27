@@ -1,0 +1,29 @@
+  启动步骤
+
+  1. 启动 MinerU 模型服务（端口 8003）
+
+  cd E:\Develop_docu\sql_0722_center\mineru_0720
+  .venv\Scripts\python.exe web_app\server.py
+
+  等待 3-5 分钟模型预热完成。验证：浏览器打开 http://127.0.0.1:8003/api/status，看到 "model_loaded":true 即就绪。
+
+  2. 启动 data_processing_center 后端（端口 8001）
+
+  cd E:\Develop_docu\sql_0722_center\data_processing_center
+  .venv\Scripts\python.exe main.py
+
+  3. 启动前端（端口 8000）
+
+  cd E:\Develop_docu\sql_0722_center\data_processing_center\app
+  npm run dev
+
+
+
+  1. 双击 E:\Develop_docu\sql_0722_center\启动项目.bat
+     或手动:
+     cd mineru_0720 && .venv\Scripts\python.exe web_app\server.py   ← 8003，预热~10秒
+     cd data_processing_center && .venv\Scripts\python.exe main.py   ← 8001
+     cd app && npm run dev                                           ← 8000
+
+  2. 浏览器打开 http://localhost:8000
+  3. 等顶部状态栏绿点亮起即可开始上传文档

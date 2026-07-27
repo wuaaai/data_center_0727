@@ -1,0 +1,20 @@
+# minerU — PDF 解析核心
+mineru>=3.2.0
+
+# DOCX 生成
+python-docx>=1.0.0
+
+# 进度条
+tqdm>=4.60.0
+
+# 日志
+loguru>=0.7.0
+
+# minerU 依赖（根据所选后端安装）
+# - pipeline 后端需要: torch, transformers, paddleocr 等
+# - hybrid-auto-engine 需要: torch + VLM 模型
+# - vlm-http-client 仅需网络请求，无需 torch
+# 请根据实际使用的后端选择安装:
+#   pip install mineru[pipeline]    # pipeline 后端
+#   pip install mineru[core]        # 核心 + VLM 后端
+#   pip install mineru              # 仅客户端（http-client 后端）

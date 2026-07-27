@@ -1,0 +1,41 @@
+# ── 虚拟环境 ──
+.venv/
+venv/
+env/
+
+# ── 前端依赖（由 package.json 管理）──
+app/node_modules/
+node_modules/
+
+# ── 数据目录（上传文件 + 处理输出，体积大且运行时生成）──
+data/
+output/
+
+# ── MinerU 核心输出 ──
+mineru_core/output/
+
+# ── Python 缓存 ──
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.eggs/
+
+# ── IDE ──
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ── 环境变量 / 敏感配置 ──
+.env
+.env.*
+*.local.json
+
+# ── 系统文件 ──
+.DS_Store
+Thumbs.db
+
+# ── 运行时持久化（由程序自动生成）──
+metadata_store.json
+_jobs.json

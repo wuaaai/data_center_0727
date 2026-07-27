@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% if embed %}文档管理{% else %}MinerU + RAG 文档处理系统{% endif %}</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body class="{% if embed %}embed-mode{% endif %}">
+    {% if not embed %}
+    <header>
+        <h1>📄 MinerU + RAG 文档处理系统</h1>
+        <p class="subtitle">上传 PDF / DOCX → 自动结构化处理 → 审核预览 → 入库知识库</p>
+    </header>
+    {% endif %}
+    <main>
+        {% block content %}{% endblock %}
+    </main>
+    <script src="/static/js/app.js"></script>
+    {% block scripts %}{% endblock %}
+</body>
+</html>
