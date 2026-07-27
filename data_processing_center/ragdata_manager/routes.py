@@ -258,7 +258,7 @@ def _process_document_background(job_id: str, input_path: Path):
                     # 再确认一下 MinerU 是不是真的完成了
                     time.sleep(1)
                     try:
-                        req2 = urllib.request.Request(f"http://127.0.0.1:8003/api/parse/{mineru_task_id}")
+                        req2 = urllib.request.Request(f"{MINERU_SERVICE_URL}/api/parse/{mineru_task_id}")
                         with urllib.request.urlopen(req2, timeout=5) as resp2:
                             data2 = _json.loads(resp2.read().decode("utf-8"))
                         if data2["status"] == "completed":
