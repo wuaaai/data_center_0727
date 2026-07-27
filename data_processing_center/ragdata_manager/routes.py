@@ -911,7 +911,7 @@ async def ingest_job(job_id: str):
             and not k.startswith("_CONDA")
             and not k.startswith("__CONDA")
         }
-        ingest_env.setdefault("SYSTEMROOT", "C:\\Windows")
+        ingest_env.setdefault("SYSTEMROOT", os.getenv("SYSTEMROOT", os.path.expandvars("%SystemRoot%")))
         ingest_env["PYTHONUNBUFFERED"] = "1"
         ingest_env["PYTHONIOENCODING"] = "utf-8"
 
@@ -1044,7 +1044,7 @@ async def ingest_batch(request: Request):
                     and not k.startswith("_CONDA")
                     and not k.startswith("__CONDA")
                 }
-                ingest_env.setdefault("SYSTEMROOT", "C:\\Windows")
+                ingest_env.setdefault("SYSTEMROOT", os.getenv("SYSTEMROOT", os.path.expandvars("%SystemRoot%")))
                 ingest_env["PYTHONUNBUFFERED"] = "1"
                 ingest_env["PYTHONIOENCODING"] = "utf-8"
 

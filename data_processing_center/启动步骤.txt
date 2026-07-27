@@ -1,0 +1,25 @@
+启动步骤
+
+本项目的所有代码均在 data_processing_center 目录内，不再依赖外部 mineru_0720。
+
+前提：
+- Python 3.10+ .venv 已创建（含所有依赖）
+- Node.js 已安装
+- modelscope 模型已下载到 data_processing_center/modelscope/
+
+1. 启动 MinerU 模型服务（端口 8003）
+
+   .venv\Scripts\python.exe mineru_app\server.py
+
+   等待模型预热完成。验证：浏览器打开 http://127.0.0.1:8003/api/status，看到 "model_loaded":true 即就绪。
+
+2. 启动后端服务（端口 8001）
+
+   .venv\Scripts\python.exe main.py
+
+3. 启动前端（端口 8000）
+
+   cd app
+   npm run dev
+
+一键启动：双击 启动项目.bat

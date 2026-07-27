@@ -9,17 +9,13 @@ node_modules/
 **/node_modules/
 
 # ── 运行时数据目录（上传文件 + 处理输出 + 中间产物）──
-# 只排除项目根目录和特定模块下的运行时 data/output，不误杀 app/src/data/ 等源码目录
+# 只排除根目录和特定模块下的运行时 data/output，不误杀源码目录
 /data_processing_center/data/
 /data_processing_center/output/
 /data_processing_center/mineru_core/output/
-/mineru_0720/data/
-/mineru_0720/output/
 
 # ── 模型文件（体积巨大，运行时下载到本地）──
-models/
-modelscope/
-**/models/
+/modelscope/
 **/modelscope/
 
 # ── Python 缓存 ──
@@ -59,3 +55,6 @@ _jobs.json
 
 # ── Claude 内部目录 ──
 .claude/
+
+# ── 已废弃的旧目录 ──
+/mineru_0720/
