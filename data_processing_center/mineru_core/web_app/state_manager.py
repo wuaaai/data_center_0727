@@ -77,6 +77,11 @@ def _create_job_inner(job_id: str, filename: str, file_size: int, input_path: st
             "preview_text": None,
             "modified_at": None,
             "modify_count": 0,
+            # 新增: 多知识库支持
+            "kb_id": "",  # 默认文档池
+            "tags": [],
+            "region_code": "",
+            "auto_allocated": False,
         }
         _save_to_disk()
 

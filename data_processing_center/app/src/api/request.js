@@ -1,4 +1,4 @@
-const BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8001'
+const BASE_URL = import.meta.env.VITE_API_BASE_URL || window.location.origin
 
 function buildUrl(url, params = {}) {
   const requestUrl = new URL(url, BASE_URL)
@@ -14,7 +14,7 @@ async function request(url, options = {}) {
   const response = await fetch(url, options)
   const data = await response.json().catch(() => ({}))
   if (!response.ok) {
-    const message = data.detail || data.message || '请求失败'
+    const message = data.detail || data.message || data.error || '请求失败'
     throw new Error(message)
   }
   return data
@@ -39,5 +39,13 @@ export function del(url, config = {}) {
   return request(buildUrl(url), {
     method: 'DELETE',
     headers: { 'Content-Type': 'application/json', ...(config.headers || {}) }
+  })
+}
+
+export function put(url, body = {}, config = {}) {
+  return request(buildUrl(url), {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', ...(config.headers || {}) },
+    body: JSON.stringify(body)
   })
 }

@@ -14,7 +14,7 @@ app = FastAPI(
     description="数据处理中心最简 FastAPI 启动入口。",
 )
 
-origins = ["http://localhost:8000"]
+origins = ["http://localhost:8000", "http://127.0.0.1:8000", "http://localhost:5173", "http://127.0.0.1:5173"]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,

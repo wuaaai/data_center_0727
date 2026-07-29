@@ -54,3 +54,26 @@ MINERU_SITE_PACKAGES = os.getenv("MINERU_SITE_PACKAGES", _default_site)
 
 # ── MinerU 模型服务地址（8001 后端通过 HTTP 调用 8003）──
 MINERU_SERVICE_URL = os.getenv("MINERU_SERVICE_URL", "http://127.0.0.1:8003")
+# MinerU /file-parse 统一入口（本地开发用）
+MINERU_FILE_PARSE_URL = os.getenv("MINERU_FILE_PARSE_URL", "http://127.0.0.1:8003/file-parse")
+
+# ── 解析引擎选择: local | maas ──
+PARSE_ENGINE = os.getenv("PARSE_ENGINE", "local")
+# Maas 内网解析接口
+MAAS_PARSE_URL = os.getenv(
+    "MAAS_PARSE_URL",
+    "https://910b.hbmaas.com/idp-model-1000000232-9093/file_parse"
+)
+MAAS_PARSE_TIMEOUT = int(os.getenv("MAAS_PARSE_TIMEOUT", "600"))
+
+# ── 知识库管理 ──
+DB_KB_TABLE = os.getenv("PGVECTOR_KB_TABLE", "knowledge_bases")
+DB_MATCH_RULES_TABLE = os.getenv("PGVECTOR_MATCH_RULES_TABLE", "region_match_rules")
+DB_AUDIT_TABLE = os.getenv("PGVECTOR_AUDIT_TABLE", "audit_log")
+DEFAULT_KB_ID = os.getenv("DEFAULT_KB_ID", "default")
+
+# ── 批量处理 ──
+MAX_CONCURRENT_DOCS = int(os.getenv("MAX_CONCURRENT_DOCS", "6"))
+MAX_BATCH_FILES = int(os.getenv("MAX_BATCH_FILES", "500"))
+# 目录扫描安全白名单
+ALLOWED_SCAN_PATHS = os.getenv("ALLOWED_SCAN_PATHS", "").split(";")

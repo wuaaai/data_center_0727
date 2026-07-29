@@ -1,21 +1,33 @@
   启动步骤
 
-  1. 启动 MinerU 模型服务（端口 8003）
+  所有代码都在 E:\Develop_docu\sql_0722_center\data_processing_center 下。
+  mineru_0720 是旧的 MinerU 原始项目副本（可删除），已经不需要了。
 
-  cd E:\Develop_docu\sql_0722_center\mineru_0720
-  .venv\Scripts\python.exe web_app\server.py
-
-  等待 3-5 分钟模型预热完成。验证：浏览器打开 http://127.0.0.1:8003/api/status，看到 "model_loaded":true 即就绪。
-
-  2. 启动 data_processing_center 后端（端口 8001）
+  1. 启动后端（端口 8001）—— 必须启动
 
   cd E:\Develop_docu\sql_0722_center\data_processing_center
   .venv\Scripts\python.exe main.py
 
-  3. 启动前端（端口 8000）
+  知识库管理、文档 CRUD、启用/禁用、元数据查看全部可用。
+
+  2. 启动前端（端口 8000）—— 必须启动
 
   cd E:\Develop_docu\sql_0722_center\data_processing_center\app
   npm run dev
+
+  3. （可选）启动文档解析引擎
+
+  MinerU 模型服务（端口 8003），仅上传文档需要：
+  cd E:\Develop_docu\sql_0722_center\mineru_0720
+  .venv\Scripts\python.exe web_app\server.py
+  等待 3-5 分钟模型预热。
+  验证：浏览器打开 http://127.0.0.1:8003/api/status，看到 "model_loaded":true
+
+  或者使用内网 Maas 引擎（生产环境）：
+  set PARSE_ENGINE=maas
+  （环境变量切换，无需启动 MinerU 服务）
+
+  4. 打开浏览器 http://localhost:8000
 
 
 

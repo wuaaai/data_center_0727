@@ -9,6 +9,18 @@ export default defineConfig({
         target:"http://localhost:8001",
         changeOrigin:true,
         rewrite:(path)=>path.replace(/^\/api/,"")
+      },
+      "/ragdata":{
+        target:"http://localhost:8001",
+        changeOrigin:true
+      },
+      "/dataManage":{
+        target:"http://localhost:8001",
+        changeOrigin:true
+      },
+      "/metadataManage":{
+        target:"http://localhost:8001",
+        changeOrigin:true
       }
     }
   },

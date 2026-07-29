@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import json
 import os
 import shutil
 import subprocess
@@ -39,12 +40,20 @@ from .config import (
     MINERU_VENV_PYTHON,
     MINERU_SITE_PACKAGES,
     MINERU_SERVICE_URL,
+    MINERU_FILE_PARSE_URL,
+    PARSE_ENGINE,
+    MAAS_PARSE_URL,
+    MAAS_PARSE_TIMEOUT,
+    DB_KB_TABLE,
+    DB_AUDIT_TABLE,
+    DEFAULT_KB_ID,
+    MAX_CONCURRENT_DOCS,
 )
 
 router = APIRouter(tags=["知识库数据管理"])
 
 # 最大上传文件数
-_MAX_UPLOAD_FILES = 3
+_MAX_UPLOAD_FILES = int(os.getenv("MAX_UPLOAD_FILES", "20"))
 _ingestion_lock = threading.Lock()
 # 专用线程池，避免共享 FastAPI 默认线程池导致高并发时耗尽
 _doc_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="doc-proc")
@@ -119,128 +128,141 @@ def _extract_preview_text(docx_path: Path, max_lines: int = PREVIEW_MAX_LINES) -
         return f"[预览提取失败: {e}]"
 
 
+def _submit_to_parser(file_bytes: bytes, file_name: str, parse_url: str, is_maas: bool = False) -> dict:
+    """提交文档到解析引擎。格式统一为 multipart/form-data。
+
+    Maas 格式:  files=@xxx  + format=markdown
+    本地格式:  files=@xxx  + format=markdown (完全一致)
+    """
+    import urllib.request, json as _json
+
+    boundary = "----FormBoundary" + uuid.uuid4().hex[:16]
+    body_head = (
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="files"; filename="{file_name}"\r\n'
+        f"Content-Type: application/octet-stream\r\n\r\n"
+    ).encode("utf-8")
+    body_tail = (
+        f"\r\n--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="format"\r\n\r\n'
+        f"markdown\r\n"
+        f"--{boundary}--\r\n"
+    ).encode("utf-8")
+    body = body_head + file_bytes + body_tail
+
+    timeout = MAAS_PARSE_TIMEOUT if is_maas else 30
+    req = urllib.request.Request(
+        parse_url,
+        data=body,
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return _json.loads(resp.read().decode("utf-8"))
+
+
 def _process_document_background(job_id: str, input_path: Path):
-    """后台处理文档：通过 HTTP 提交到 MinerU 常驻模型服务。异步执行，不占线程池。
+    """后台处理文档：根据 PARSE_ENGINE 选择解析后端（Maas 内网 或 本地 MinerU）。
 
-    进度文本前缀说明：
-    - dcp 侧使用 "[准备中]" 标记自身的排队/提交阶段（避免与 MinerU 的 [环节 1/4] 重复）
-    - 一旦 MinerU 返回 progress，dcp 直接透传（此时显示 MinerU 的 [环节 X/4]）
-
-    Bug 38: 线程启动后检查 job 是否已被删除。若被删除则立即停止，不提交 MinerU。
+    Maas 模式: 直接调用内网 /file_parse，轮询等待完成
+    本地模式: 先等 MinerU 服务就绪，再提交 /file_parse，轮询等待完成
     """
     import urllib.request, json as _json, urllib.parse
 
-    # 启动前检查：job 可能已被删除（用户在前端点了删除）
     if not state_manager.get_job(job_id):
         return
 
+    is_maas = (PARSE_ENGINE == "maas")
+    parse_url = MAAS_PARSE_URL if is_maas else MINERU_FILE_PARSE_URL
+
     try:
-        state_manager.update_job(job_id, status="queued", progress="[准备中] 正在排队等待处理...", progress_pct=0)
+        state_manager.update_job(job_id, status="queued",
+                                 progress=f"[准备中] 提交到 {'Maas' if is_maas else '本地'} 解析引擎...",
+                                 progress_pct=0)
 
         job_output_dir = OUTPUT_DIR / job_id
         job_output_dir.mkdir(parents=True, exist_ok=True)
 
         t_start = time.perf_counter()
-        new_pct = 0  # 初始化，防止 UnboundLocalError
 
-        # 等待模型服务就绪（用标准库 urllib 避免 httpx 依赖）
-        last_health_progress = ""
-        for attempt in range(180):  # 最多等 3 分钟
-            try:
-                req = urllib.request.Request(f"{MINERU_SERVICE_URL}/api/health")
-                with urllib.request.urlopen(req, timeout=5) as resp:
-                    data = _json.loads(resp.read().decode("utf-8"))
-                    if data.get("model_loaded"):
-                        break
-            except Exception:
-                pass
-            # 每 10 次（20 秒）更新一次进度，避免重复写盘
-            new_progress = f"[准备中] 等待模型服务就绪...（已等待 {(attempt + 1) * 2}秒）"
-            if (attempt + 1) % 10 == 0 and new_progress != last_health_progress:
-                state_manager.update_job(job_id, progress=new_progress, progress_pct=0)
-                last_health_progress = new_progress
-            time.sleep(2)
-        else:
-            raise RuntimeError("模型服务未就绪，请稍后重试")
+        # 本地模式: 等待 MinerU 服务就绪
+        if not is_maas:
+            last_health_progress = ""
+            for attempt in range(180):
+                try:
+                    req = urllib.request.Request(f"{MINERU_SERVICE_URL}/api/health")
+                    with urllib.request.urlopen(req, timeout=5) as resp:
+                        data = _json.loads(resp.read().decode("utf-8"))
+                        if data.get("model_loaded"):
+                            break
+                except Exception:
+                    pass
+                new_progress = f"[准备中] 等待本地模型服务就绪...（已等待 {(attempt + 1) * 2}秒）"
+                if (attempt + 1) % 10 == 0 and new_progress != last_health_progress:
+                    state_manager.update_job(job_id, progress=new_progress, progress_pct=0)
+                    last_health_progress = new_progress
+                time.sleep(2)
+            else:
+                raise RuntimeError("本地模型服务未就绪，请稍后重试")
 
-        # 提交解析任务到模型服务（上传文件，需用 POST）
+        # 提交文件到解析引擎
         state_manager.update_job(job_id, progress="[准备中] 正在发送文档到分析引擎...", progress_pct=0)
-        boundary = "----FormBoundary" + uuid.uuid4().hex[:16]
         file_bytes = input_path.read_bytes()
         file_bytes_size = len(file_bytes)
-        # 转义文件名中的特殊字符，避免破坏 multipart 编码 (Bug 19)
         file_name = input_path.name.replace('"', "'").replace("\n", " ").replace("\r", " ")
-        body_lines = [
-            f"--{boundary}",
-            f'Content-Disposition: form-data; name="file"; filename="{file_name}"',
-            "Content-Type: application/octet-stream",
-            "",
-        ]
-        body_head = "\r\n".join(body_lines).encode("utf-8") + b"\r\n"
-        body_tail = f"\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"output_dir\"\r\n\r\n{job_output_dir}\r\n--{boundary}--\r\n".encode("utf-8")
-        body = body_head + file_bytes + body_tail
-        content_type = f"multipart/form-data; boundary={boundary}"
-        req = urllib.request.Request(
-            f"{MINERU_SERVICE_URL}/api/parse",
-            data=body,
-            headers={"Content-Type": content_type},
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                resp_data = _json.loads(resp.read().decode("utf-8"))
-        except Exception as e:
-            raise RuntimeError(f"提交任务失败: {e}")
-        mineru_task_id = resp_data["task_id"]
-        state_manager.update_job(job_id, status="processing", progress="[准备中] 已发送文档，等待分析引擎接收...",
-                                 mineru_task_id=mineru_task_id, progress_pct=5)
-        # 初始前缀：即使文件极小瞬间完成，重试时也不会空串
-        _last_progress_prefix = "[准备中] 已发送文档，等待分析引擎接收"
 
-        # 轮询等待完成（带超时保护，根据文件大小动态扩窗）
-        # 28MB PDF 含大量表格：OCR 可能要 2-3 小时。
-        # 倍率: 600秒/1MB, 上限 10800秒(3小时)
+        resp_data = _submit_to_parser(file_bytes, file_name, parse_url, is_maas=is_maas)
+
+        parse_task_id = resp_data.get("task_id", "")
+        state_manager.update_job(job_id, status="processing",
+                                 progress=f"[准备中] 已发送文档，{'Maas' if is_maas else '本地'}引擎处理中...",
+                                 mineru_task_id=parse_task_id, progress_pct=5)
+
+        # 轮询等待完成
         file_size_mb = file_bytes_size / (1024 * 1024)
         actual_timeout = max(JOB_TIMEOUT_SECONDS, min(int(file_size_mb * 600), 10800))
         deadline = time.perf_counter() + actual_timeout
-        consecutive_errors = 0  # 连续网络错误计数 (Bug 4)
+        consecutive_errors = 0
+
+        status_url = f"{parse_url}/{parse_task_id}"
+        if is_maas:
+            # Maas 返回格式可能不同，简易轮询
+            status_url = parse_url.replace("/file_parse", f"/file_parse/{parse_task_id}")
+            # 如果 Maas URL 中已有 /file_parse 就直接拼接
+            if "/file-parse/" not in status_url and "/file_parse/" not in status_url:
+                status_url = "/".join(parse_url.rsplit("/", 1)[:-1]) + f"/{parse_task_id}"
+
         while True:
             if time.perf_counter() > deadline:
                 raise TimeoutError(f"文档处理超时 (>{actual_timeout}秒)")
             time.sleep(3)
             try:
-                req = urllib.request.Request(f"{MINERU_SERVICE_URL}/api/parse/{mineru_task_id}")
+                # 统一用 /file-parse/{task_id} 查状态
+                req = urllib.request.Request(f"{parse_url}/{parse_task_id}")
                 with urllib.request.urlopen(req, timeout=10) as resp:
                     data = _json.loads(resp.read().decode("utf-8"))
-                consecutive_errors = 0  # 成功则重置错误计数
-                if data.get("progress"):
-                    new_pct = data.get("progress_pct", 0)
-                    # MinerU 返回的 progress 已含 "[环节 X/4]" 前缀，dcp 直接透传
-                    # 记录前缀用于重试时保持一致性（但避免 "处理完成" 被拼接重试后缀）
-                    if data["progress"] != "处理完成":
-                        _last_progress_prefix = data["progress"]
-                    # ★ Bug 36: 去掉 max() 单调保护。
-                    # MinerU 同一阶段内不同子任务（排版检测→OCR识别→公式识别）
-                    # 每个子任务有独立 0-100% 的 tqdm 进度，用 max 会导致新子任务
-                    # 的低百分比被旧子任务的高百分比覆盖（如 OCR 26% → 显示 88%）。
-                    # MinerU 已用 _STAGE_PCT_BASE 保证阶段间不回退，dcp 直接信任即可。
-                    state_manager.update_job(job_id, progress=data["progress"],
-                                             progress_pct=new_pct)
-                if data["status"] == "completed":
-                    elapsed = time.perf_counter() - t_start
-                    # 优先用 MinerU API 返回的真实 output_path，本地 glob 做兜底
-                    api_result_path = (data.get("result") or {}).get("output_path")
-                    api_chunk_count = (data.get("result") or {}).get("chunk_count", 0)
+                consecutive_errors = 0
+
+                progress_text = data.get("progress", "")
+                if progress_text:
+                    state_manager.update_job(job_id, progress=progress_text,
+                                             progress_pct=data.get("progress_pct", 0))
+
+                if data.get("status") == "completed":
+                    # 解析完成: 获取 output_path
+                    result_data = data.get("result") or {}
+                    api_output = result_data.get("output_path")
                     docx_files = list(job_output_dir.glob("**/*.docx"))
-                    local_result_path = docx_files[0] if docx_files else None
-                    # 取真实存在的文件路径
-                    if api_result_path and Path(api_result_path).exists():
-                        result_path = Path(api_result_path)
-                    elif local_result_path and local_result_path.exists():
-                        result_path = local_result_path
+                    if api_output and Path(api_output).exists():
+                        result_path = Path(api_output)
+                    elif docx_files:
+                        result_path = docx_files[0]
                     else:
                         result_path = None
-                    chunk_count = _count_chunks(result_path) if result_path else max(api_chunk_count, 0)
-                    preview_text = _extract_preview_text(result_path) if result_path else ""
+
+                    elapsed = time.perf_counter() - t_start
+                    chunk_count = _count_chunks(result_path) if result_path else 0
+                    preview_text = _extract_preview_text(result_path) if result_path else (result_data.get("markdown", "")[:5000])
+
                     state_manager.update_job(
                         job_id, status="completed",
                         output_path=str(result_path) if result_path else None,
@@ -249,97 +271,37 @@ def _process_document_background(job_id: str, input_path: Path):
                         progress_pct=100,
                     )
                     break
-                elif data["status"] == "failed":
-                    raise RuntimeError(data.get("error", "模型服务处理失败"))
-                # Bug 40: 兜底 — 如果 MinerU 返回了 completed 但 dcp 因 GIL 窗口
-                # 读到中间状态，下次 poll 时 status 可能仍是 processing。
-                # 用 progress_pct==100 作为 signals 强制推进 break，不再等其他状态更新。
-                elif data.get("progress_pct") == 100 and data["status"] == "processing":
-                    # 再确认一下 MinerU 是不是真的完成了
-                    time.sleep(1)
-                    try:
-                        req2 = urllib.request.Request(f"{MINERU_SERVICE_URL}/api/parse/{mineru_task_id}")
-                        with urllib.request.urlopen(req2, timeout=5) as resp2:
-                            data2 = _json.loads(resp2.read().decode("utf-8"))
-                        if data2["status"] == "completed":
-                            # 确认完成，走完整的 completed 处理流程
-                            elapsed = time.perf_counter() - t_start
-                            api_result_path = (data2.get("result") or {}).get("output_path")
-                            api_chunk_count = (data2.get("result") or {}).get("chunk_count", 0)
-                            docx_files = list(job_output_dir.glob("**/*.docx"))
-                            local_result_path = docx_files[0] if docx_files else None
-                            if api_result_path and Path(api_result_path).exists():
-                                result_path = Path(api_result_path)
-                            elif local_result_path and local_result_path.exists():
-                                result_path = local_result_path
-                            else:
-                                result_path = None
-                            chunk_count = _count_chunks(result_path) if result_path else max(api_chunk_count, 0)
-                            preview_text = _extract_preview_text(result_path) if result_path else ""
-                            state_manager.update_job(
-                                job_id, status="completed",
-                                output_path=str(result_path) if result_path else None,
-                                progress="处理完成", chunk_count=chunk_count,
-                                processing_time=round(elapsed, 1), preview_text=preview_text,
-                                progress_pct=100,
-                            )
-                            break
-                    except Exception:
-                        pass  # 确认失败，继续下一轮 poll
-                elif data["status"] in ("cancelled", "cancelling"):
-                    # Bug 38: MinerU 任务已被取消（用户删除 job 时触发），停止轮询
+                elif data.get("status") == "failed":
+                    raise RuntimeError(data.get("error", "解析引擎处理失败"))
+                elif data.get("status") in ("cancelled", "cancelling"):
                     raise RuntimeError("任务已被取消")
+
             except RuntimeError:
                 raise
             except Exception as e:
                 consecutive_errors += 1
-                if consecutive_errors >= 30:  # 连续 90 秒通信失败则放弃 (Bug 4)
-                    raise RuntimeError(f"MinerU 服务通信失败（连续{consecutive_errors}次）: {e}")
-                # 轮询失败时更新进度文本，维持 MinerU 返回的最后进度前缀 (Bug 26)
-                # 从 job 当前状态读取 progress，而不是依赖可能已过时的局部变量
+                if consecutive_errors >= 30:
+                    raise RuntimeError(f"解析引擎通信失败（连续{consecutive_errors}次）: {e}")
                 current_job = state_manager.get_job(job_id)
                 current_progress = current_job.get("progress", "") if current_job else ""
-                current_pct = current_job.get("progress_pct", 0) if current_job else 0
+                retry_tag = f"（通信重试 {consecutive_errors}/30）"
+                state_manager.update_job(job_id,
+                                         progress=f"{current_progress}...{retry_tag}",
+                                         progress_pct=5)
 
-                if current_pct >= 100 or (current_progress and "100%" in current_progress):
-                    # Bug 39: 文件已 100% 完成，用当前进度文本而非 _last_progress_prefix
-                    # （避免拼接出 "[准备中] ...（等待确认完成）" 的错乱文本）
-                    state_manager.update_job(job_id,
-                                             progress=f"{current_progress}（等待确认完成...）",
-                                             progress_pct=100)
-                else:
-                    retry_tag = f"（通信重试 {consecutive_errors}/30）"
-                    if _last_progress_prefix:
-                        clean_prefix = _last_progress_prefix.rstrip(".").rstrip("…")
-                        state_manager.update_job(job_id, progress=f"{clean_prefix}...{retry_tag}",
-                                                 progress_pct=5)
-                    else:
-                        state_manager.update_job(job_id, progress=f"[准备中] 等待引擎响应...{retry_tag}",
-                                                 progress_pct=5)
     except TimeoutError as e:
-        # 超时时不立即标为 failed，告知用户 MinerU 可能仍在处理
         elapsed_min = round((time.perf_counter() - t_start) / 60, 1)
-        state_manager.update_job(
-            job_id, status="failed", error=str(e),
-            progress=f"轮询超时（{elapsed_min}分钟），文件较大请重新提交或拆分后上传",
-            progress_pct=0,
-            mineru_task_id=None,
-        )
+        state_manager.update_job(job_id, status="failed", error=str(e),
+                                 progress=f"轮询超时（{elapsed_min}分钟），文件较大请重新提交或拆分后上传",
+                                 progress_pct=0, mineru_task_id=None)
     except Exception as e:
-        # 区分取消和真正的失败
         error_msg = str(e)
         if "已被取消" in error_msg:
-            state_manager.update_job(
-                job_id, status="cancelled", error=error_msg,
-                progress="任务已取消", progress_pct=0,
-                mineru_task_id=None,
-            )
+            state_manager.update_job(job_id, status="cancelled", error=error_msg,
+                                     progress="任务已取消", progress_pct=0, mineru_task_id=None)
         else:
-            state_manager.update_job(
-                job_id, status="failed", error=error_msg,
-                progress="处理失败，请查看详情", progress_pct=0,
-                mineru_task_id=None,
-            )
+            state_manager.update_job(job_id, status="failed", error=error_msg,
+                                     progress="处理失败，请查看详情", progress_pct=0, mineru_task_id=None)
         traceback.print_exc()
 
 
@@ -354,6 +316,17 @@ async def upload_file(request: Request):
     try:
         form = await request.form()
         region_code_raw = str(form.get("region_code", "") or "")
+        kb_id_raw = form.get("kb_id", None)
+        kb_id = str(kb_id_raw) if kb_id_raw is not None else ""  # 默认文档池
+        auto_allocate_raw = str(form.get("auto_allocate", "") or "")
+        auto_allocate = auto_allocate_raw.lower() in ("true", "1", "yes")
+        tags_raw = str(form.get("tags", "") or "")
+        tags = []
+        if tags_raw:
+            try:
+                tags = json.loads(tags_raw) if tags_raw.startswith("[") else [t.strip() for t in tags_raw.split(",") if t.strip()]
+            except Exception:
+                tags = [t.strip() for t in tags_raw.split(",") if t.strip()]
         upload_files = form.getlist("files")
     except Exception:
         return JSONResponse({"error": "无法解析上传表单"}, status_code=400)
@@ -438,8 +411,8 @@ async def upload_file(request: Request):
             input_path=str(input_path),
         )
 
-        # 将地区编码存入任务状态
-        state_manager.update_job(job_id, status="queued", region_code=region_code_raw)
+        # 将地区编码和知识库存入任务状态
+        state_manager.update_job(job_id, status="queued", region_code=region_code_raw, kb_id=kb_id, tags=tags)
 
         # 异步后台处理（使用专用线程池，避免共享 FastAPI 默认线程池）
         import asyncio
@@ -475,8 +448,8 @@ async def get_stats():
 # ═══════════════════════════════════════════════════════════════
 
 @router.get("/knowledge", summary="知识库概览")
-async def get_knowledge(sort: str = "time"):
-    """查询向量库中所有文档及切片统计。管理界面不做权限过滤，检索召回时再按权限限制。"""
+async def get_knowledge(sort: str = "time", kb_id: str = None, enabled: str = None):
+    """查询向量库中所有文档及切片统计。支持 ?kb_id= + ?enabled= 过滤。管理界面不做权限过滤。"""
     try:
         engine = create_engine(DB_CONNECTION)
         order_clause = {
@@ -485,18 +458,40 @@ async def get_knowledge(sort: str = "time"):
             "chunks": "count(*) DESC",
         }.get(sort, f"MAX({DB_METADATA_COL}->>'created_at') DESC")
 
+        # 构建 WHERE 子句
+        where_clauses = []
+        params = {}
+        if kb_id == "__pool__":
+            where_clauses.append(
+                f"({DB_METADATA_COL}->>'kb_id' IS NULL OR {DB_METADATA_COL}->>'kb_id' = '')"
+            )
+        elif kb_id:
+            where_clauses.append(f"{DB_METADATA_COL}->>'kb_id' = :kb_id")
+            params["kb_id"] = kb_id
+        if enabled is not None:
+            where_clauses.append(f"({DB_METADATA_COL}->>'enabled')::boolean = :enabled")
+            params["enabled"] = enabled.lower() == "true"
+        where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+
         with engine.connect() as conn:
             result = conn.execute(text(f"""
                 SELECT COALESCE({DB_METADATA_COL}->>'filename', {DB_METADATA_COL}->>'source') AS filename,
                        {DB_METADATA_COL}->>'source' AS source,
+                       MAX({DB_METADATA_COL}->>'kb_id') AS kb_id,
                        count(*) AS chunks,
                        MAX({DB_METADATA_COL}->>'created_at') AS last_ingest,
-                       MAX({DB_METADATA_COL}->>'region_code') AS region_code
+                       MAX({DB_METADATA_COL}->>'region_code') AS region_code,
+                       MAX({DB_METADATA_COL}->>'enabled') AS enabled,
+                       MAX({DB_METADATA_COL}->>'tags') AS tags
                 FROM {DB_TABLE}
-                GROUP BY {DB_METADATA_COL}->>'source', {DB_METADATA_COL}->>'filename'
+                {where_sql}
+                GROUP BY {DB_METADATA_COL}->>'source', {DB_METADATA_COL}->>'filename', {DB_METADATA_COL}->>'kb_id'
                 ORDER BY {order_clause} NULLS LAST
-            """))
-            rows = [{"filename": r[0] or "", "source": r[1] or "", "chunks": r[2], "last_ingest": r[3] or "", "region_code": r[4] or ""}
+            """), params)
+            rows = [{"filename": r[0] or "", "source": r[1] or "", "kb_id": r[2] if r[2] is not None else "default",
+                     "chunks": r[3], "last_ingest": r[4] or "", "region_code": r[5] or "",
+                     "enabled": r[6] == "true" or r[6] is None,
+                     "tags": (lambda t: json.loads(t) if isinstance(t, str) and t.startswith("[") else (t if isinstance(t, list) else []))(r[7])}
                     for r in result.fetchall()]
         engine.dispose()
 
@@ -871,8 +866,8 @@ async def batch_download(request: Request):
 # ═══════════════════════════════════════════════════════════════
 
 @router.post("/jobs/{job_id}/ingest", summary="入库到向量知识库")
-async def ingest_job(job_id: str):
-    """将处理后的 DOCX 导入 pgvector 知识库。"""
+async def ingest_job(job_id: str, request: Request = None):
+    """将处理后的 DOCX 导入 pgvector 知识库。支持 Request body 传入 kb_id 覆盖 job 默认值。"""
     job = state_manager.get_job(job_id)
     if not job:
         return JSONResponse({"error": "任务不存在"}, status_code=404)
@@ -916,8 +911,19 @@ async def ingest_job(job_id: str):
         ingest_env["PYTHONUNBUFFERED"] = "1"
         ingest_env["PYTHONIOENCODING"] = "utf-8"
 
+        # 支持运行时指定 kb_id（入库弹窗传入，优先于 job 默认值）
+        body_kb = {}
+        if request:
+            try:
+                body_kb = await request.json()
+            except Exception:
+                pass
+        kb_id = body_kb.get("kb_id") if "kb_id" in body_kb else job.get("kb_id", "")
+        region_code = job.get("region_code", "000000")
+        tags = json.dumps(job.get("tags", []), ensure_ascii=False) if isinstance(job.get("tags"), list) else "[]"
+
         result = subprocess.run(
-            [mineru_python, str(RAG_INGEST_SCRIPT), str(output_path), job_id],
+            [mineru_python, str(RAG_INGEST_SCRIPT), str(output_path), job_id, kb_id, region_code, tags],
             cwd=str(MINERU_BASE),
             capture_output=True,
             text=True, encoding='utf-8', errors='replace',
@@ -1049,8 +1055,12 @@ async def ingest_batch(request: Request):
                 ingest_env["PYTHONUNBUFFERED"] = "1"
                 ingest_env["PYTHONIOENCODING"] = "utf-8"
 
+                kb_id = job.get("kb_id", "default")
+                region_code = job.get("region_code", "000000")
+                tags = json.dumps(job.get("tags", []), ensure_ascii=False) if isinstance(job.get("tags"), list) else "[]"
+
                 result = subprocess.run(
-                    [mineru_python, str(RAG_INGEST_SCRIPT), str(output_path), job_id],
+                    [mineru_python, str(RAG_INGEST_SCRIPT), str(output_path), job_id, kb_id, region_code, tags],
                     cwd=str(MINERU_BASE),
                     capture_output=True,
                     text=True, encoding='utf-8', errors='replace',
@@ -1206,6 +1216,480 @@ async def direct_upload(file: UploadFile = File(...)):
         "chunk_count": chunk_count,
         "message": "文档已就绪，可直接入库",
     })
+
+# ═══════════════════════════════════════════════════════════════
+# 知识库管理 API (多知识库 CRUD + 文档启用/禁用 + 元数据)
+# ═══════════════════════════════════════════════════════════════
+
+# ── 辅助: 审计日志 ──
+def _audit(action: str, target_type: str, target_id: str, detail: dict = None, operator: str = ""):
+    """写入审计日志到 PostgreSQL。异步执行，不阻塞 API 响应。"""
+    try:
+        engine = create_engine(DB_CONNECTION)
+        with engine.connect() as conn:
+            conn.execute(
+                text(f"INSERT INTO {DB_AUDIT_TABLE} (action, target_type, target_id, detail, operator) "
+                     "VALUES (:a, :t, :i, :d, :o)"),
+                {"a": action, "t": target_type, "i": target_id,
+                 "d": json.dumps(detail or {}, ensure_ascii=False), "o": operator},
+            )
+            conn.commit()
+        engine.dispose()
+    except Exception:
+        pass  # 审计失败不影响主流程
+
+
+# ── KB CRUD ──
+
+@router.get("/knowledge-bases", summary="列出所有知识库")
+async def list_knowledge_bases(is_active: bool = None):
+    """列出所有知识库，支持 ?is_active= 过滤。"""
+    try:
+        engine = create_engine(DB_CONNECTION)
+        with engine.connect() as conn:
+            sql = f"SELECT id, name, description, directory_keywords, is_active, owner_id, created_at, updated_at FROM {DB_KB_TABLE}"
+            if is_active is not None:
+                sql += f" WHERE is_active = {str(is_active).lower()}"
+            sql += " ORDER BY created_at DESC"
+            result = conn.execute(text(sql))
+            kbs = [{"id": r[0], "name": r[1], "description": r[2], "directory_keywords": r[3],
+                    "is_active": r[4], "owner_id": r[5], "created_at": str(r[6]) if r[6] else "",
+                    "updated_at": str(r[7]) if r[7] else "",
+                    "collection": DB_TABLE}
+                   for r in result.fetchall()]
+        engine.dispose()
+        # 补充文档数和切片数统计
+        for kb in kbs:
+            try:
+                eng2 = create_engine(DB_CONNECTION)
+                with eng2.connect() as c2:
+                    count_r = c2.execute(
+                        text(f"SELECT COUNT(DISTINCT {DB_METADATA_COL}->>'source'), COUNT(*) FROM {DB_TABLE} WHERE {DB_METADATA_COL}->>'kb_id' = :kid"),
+                        {"kid": kb["id"]},
+                    ).fetchone()
+                    kb["document_count"] = count_r[0] if count_r else 0
+                    kb["chunk_count"] = count_r[1] if count_r else 0
+                eng2.dispose()
+            except Exception:
+                kb["document_count"] = 0
+                kb["chunk_count"] = 0
+        return {"kbs": kbs, "total": len(kbs)}
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@router.post("/knowledge-bases", summary="创建知识库")
+async def create_knowledge_base(request: Request):
+    """创建知识库: {id, name, description?}。id 校验: 字母数字+下划线+连字符。"""
+    import re
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "无效的 JSON 请求体"}, status_code=400)
+
+    kb_id = (body.get("id") or "").strip()
+    name = (body.get("name") or "").strip()
+    if not kb_id or not name:
+        return JSONResponse({"error": "id 和 name 不能为空"}, status_code=400)
+    if not re.match(r'^[a-zA-Z0-9_-]+$', kb_id):
+        return JSONResponse({"error": "id 只能包含字母、数字、下划线和连字符"}, status_code=400)
+
+    description = body.get("description", "")
+    directory_keywords = body.get("directory_keywords", "[]")
+
+    try:
+        engine = create_engine(DB_CONNECTION)
+        with engine.connect() as conn:
+            conn.execute(
+                text(f"INSERT INTO {DB_KB_TABLE} (id, name, description, directory_keywords) VALUES (:i, :n, :d, :dk)"),
+                {"i": kb_id, "n": name, "d": description, "dk": directory_keywords if isinstance(directory_keywords, str) else json.dumps(directory_keywords, ensure_ascii=False)},
+            )
+            conn.commit()
+        engine.dispose()
+        return {"status": "ok", "id": kb_id, "name": name}
+    except Exception as e:
+        if "duplicate key" in str(e).lower() or "unique" in str(e).lower():
+            return JSONResponse({"error": f"知识库 id '{kb_id}' 已存在"}, status_code=409)
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@router.get("/knowledge-bases/{kb_id}", summary="获取知识库详情")
+async def get_knowledge_base(kb_id: str):
+    """获取知识库详情，含文档数、切片数统计。"""
+    if kb_id == "stats":
+        return await get_knowledge_bases_stats()
+    try:
+        engine = create_engine(DB_CONNECTION)
+        with engine.connect() as conn:
+            result = conn.execute(
+                text(f"SELECT id, name, description, directory_keywords, is_active, owner_id, created_at, updated_at FROM {DB_KB_TABLE} WHERE id = :i"),
+                {"i": kb_id},
+            ).fetchone()
+        engine.dispose()
+        if not result:
+            return JSONResponse({"error": "知识库不存在"}, status_code=404)
+
+        kb = {"id": result[0], "name": result[1], "description": result[2], "directory_keywords": result[3],
+              "is_active": result[4], "owner_id": result[5], "created_at": str(result[6]) if result[6] else "",
+              "updated_at": str(result[7]) if result[7] else ""}
+
+        # 补充统计
+        try:
+            eng2 = create_engine(DB_CONNECTION)
+            with eng2.connect() as c2:
+                count_r = c2.execute(
+                    text(f"SELECT COUNT(DISTINCT {DB_METADATA_COL}->>'source'), COUNT(*) FROM {DB_TABLE} WHERE {DB_METADATA_COL}->>'kb_id' = :kid"),
+                    {"kid": kb_id},
+                ).fetchone()
+                kb["document_count"] = count_r[0] if count_r else 0
+                kb["chunk_count"] = count_r[1] if count_r else 0
+                # 启用/禁用分布
+                enabled_r = c2.execute(
+                    text(f"SELECT COUNT(DISTINCT {DB_METADATA_COL}->>'source') FROM {DB_TABLE} WHERE {DB_METADATA_COL}->>'kb_id' = :kid AND ({DB_METADATA_COL}->>'enabled')::boolean = true"),
+                    {"kid": kb_id},
+                ).fetchone()
+                disabled_r = c2.execute(
+                    text(f"SELECT COUNT(DISTINCT {DB_METADATA_COL}->>'source') FROM {DB_TABLE} WHERE {DB_METADATA_COL}->>'kb_id' = :kid AND ({DB_METADATA_COL}->>'enabled')::boolean = false"),
+                    {"kid": kb_id},
+                ).fetchone()
+                kb["enabled_docs"] = enabled_r[0] if enabled_r else 0
+                kb["disabled_docs"] = disabled_r[0] if disabled_r else 0
+            eng2.dispose()
+        except Exception:
+            kb["document_count"] = kb["chunk_count"] = kb["enabled_docs"] = kb["disabled_docs"] = 0
+
+        return kb
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@router.put("/knowledge-bases/{kb_id}", summary="更新知识库")
+async def update_knowledge_base(kb_id: str, request: Request):
+    """更新知识库: {name?, description?, is_active?}。"""
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "无效的 JSON 请求体"}, status_code=400)
+
+    try:
+        engine = create_engine(DB_CONNECTION)
+        with engine.connect() as conn:
+            # 先检查是否存在
+            existing = conn.execute(
+                text(f"SELECT id FROM {DB_KB_TABLE} WHERE id = :i"), {"i": kb_id}
+            ).fetchone()
+            if not existing:
+                engine.dispose()
+                return JSONResponse({"error": "知识库不存在"}, status_code=404)
+
+            updates = []
+            params = {"i": kb_id}
+            if "name" in body:
+                updates.append("name = :name")
+                params["name"] = body["name"]
+            if "description" in body:
+                updates.append("description = :desc")
+                params["desc"] = body["description"]
+            if "directory_keywords" in body:
+                dk = body["directory_keywords"]
+                updates.append("directory_keywords = :dk")
+                params["dk"] = dk if isinstance(dk, str) else json.dumps(dk, ensure_ascii=False)
+            if "is_active" in body:
+                old_is_active = body["is_active"]
+                updates.append("is_active = :ia")
+                params["ia"] = body["is_active"]
+                # 审计日志
+                _audit("toggle_kb" if not old_is_active else "enable_kb", "knowledge_base", kb_id,
+                       {"is_active": body["is_active"]})
+
+            if updates:
+                updates.append("updated_at = NOW()")
+                conn.execute(
+                    text(f"UPDATE {DB_KB_TABLE} SET {', '.join(updates)} WHERE id = :i"),
+                    params,
+                )
+                conn.commit()
+        engine.dispose()
+        return {"status": "ok", "id": kb_id}
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@router.delete("/knowledge-bases/{kb_id}", summary="删除知识库")
+async def delete_knowledge_base(kb_id: str, force: bool = False):
+    """删除知识库。有文档时返回 409，传 ?force=true 强制删除（同时清理向量切片）。"""
+    if kb_id == "default":
+        return JSONResponse({"error": "不能删除默认知识库"}, status_code=400)
+
+    try:
+        engine = create_engine(DB_CONNECTION)
+        with engine.connect() as conn:
+            # 检查是否有文档
+            count_r = conn.execute(
+                text(f"SELECT COUNT(*) FROM {DB_TABLE} WHERE {DB_METADATA_COL}->>'kb_id' = :kid"),
+                {"kid": kb_id},
+            ).fetchone()
+            chunk_count = count_r[0] if count_r else 0
+
+            if chunk_count > 0 and not force:
+                doc_count_r = conn.execute(
+                    text(f"SELECT COUNT(DISTINCT {DB_METADATA_COL}->>'source') FROM {DB_TABLE} WHERE {DB_METADATA_COL}->>'kb_id' = :kid"),
+                    {"kid": kb_id},
+                ).fetchone()
+                engine.dispose()
+                return JSONResponse({
+                    "error": f"知识库 '{kb_id}' 下有 {doc_count_r[0] if doc_count_r else 0} 个文档、{chunk_count} 个切片，请先将文档迁移到其他知识库后再删除，或使用 ?force=true 强制删除",
+                    "document_count": doc_count_r[0] if doc_count_r else 0,
+                    "chunk_count": chunk_count,
+                }, status_code=409)
+
+            # 强制删除：清理向量切片
+            if force and chunk_count > 0:
+                deleted = conn.execute(
+                    text(f"DELETE FROM {DB_TABLE} WHERE {DB_METADATA_COL}->>'kb_id' = :kid"),
+                    {"kid": kb_id},
+                ).rowcount
+                conn.commit()
+                _audit("force_delete_kb", "knowledge_base", kb_id, {"chunks_deleted": deleted})
+
+            # 删除 KB
+            conn.execute(text(f"DELETE FROM {DB_KB_TABLE} WHERE id = :i"), {"i": kb_id})
+            conn.commit()
+        engine.dispose()
+        return {"status": "ok", "message": f"知识库 '{kb_id}' 已删除"}
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@router.get("/knowledge-bases/stats", summary="全部知识库聚合统计")
+async def get_knowledge_bases_stats():
+    """返回每个知识库的文档数、切片数、启用/禁用分布。"""
+    try:
+        # 直接用 create_engine 避免闭包冲突
+        engine = create_engine(DB_CONNECTION)
+        with engine.connect() as conn:
+            kb_result = conn.execute(text(f"SELECT id, name FROM {DB_KB_TABLE} ORDER BY name"))
+            rows = list(kb_result.fetchall())
+        engine.dispose()
+
+        if not rows:
+            return {"kbs": [], "total_documents": 0, "total_chunks": 0}
+
+        kbs = [{"id": r[0], "name": r[1]} for r in rows]
+        total_docs = total_chunks = 0
+        for kb in kbs:
+            try:
+                eng2 = create_engine(DB_CONNECTION)
+                with eng2.connect() as c2:
+                    rr = c2.execute(
+                        text(f"SELECT COUNT(DISTINCT {DB_METADATA_COL}->>'source'), COUNT(*) FROM {DB_TABLE} WHERE {DB_METADATA_COL}->>'kb_id' = :kid"),
+                        {"kid": kb["id"]},
+                    ).fetchone()
+                    kb["document_count"] = rr[0] if rr else 0
+                    kb["chunk_count"] = rr[1] if rr else 0
+                eng2.dispose()
+            except Exception as ex:
+                print(f"stats error for kb {kb['id']}: {ex}")
+                kb["document_count"] = kb["chunk_count"] = 0
+            total_docs += kb["document_count"]
+            total_chunks += kb["chunk_count"]
+
+        # 补充文档池统计（kb_id 为空或 NULL 的文档）
+        pool_docs = pool_chunks = 0
+        try:
+            eng3 = create_engine(DB_CONNECTION)
+            with eng3.connect() as c3:
+                pr = c3.execute(
+                    text(f"SELECT COUNT(DISTINCT {DB_METADATA_COL}->>'source'), COUNT(*) FROM {DB_TABLE} "
+                         f"WHERE {DB_METADATA_COL}->>'kb_id' IS NULL OR {DB_METADATA_COL}->>'kb_id' = ''")
+                ).fetchone()
+                pool_docs = pr[0] if pr else 0
+                pool_chunks = pr[1] if pr else 0
+            eng3.dispose()
+        except Exception:
+            pass
+
+        return {"kbs": kbs, "total_documents": total_docs, "total_chunks": total_chunks,
+                "pool_document_count": pool_docs, "pool_chunk_count": pool_chunks}
+    except Exception as e:
+        import traceback as _tb; _tb.print_exc()
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+# ── 文档启用/禁用 ──
+
+@router.put("/knowledge/{source}/toggle", summary="切换文档启用/禁用状态")
+async def toggle_document(source: str, request: Request = None):
+    """切换单个文档的启用状态: {enabled: bool}。"""
+    try:
+        body = await request.json() if request else {}
+        enabled = body.get("enabled", None)
+    except Exception:
+        return JSONResponse({"error": "无效的 JSON 请求体"}, status_code=400)
+
+    try:
+        engine = create_engine(DB_CONNECTION)
+        with engine.connect() as conn:
+            if enabled is None:
+                # toggle: 查询当前状态后取反
+                cur_r = conn.execute(
+                    text(f"SELECT {DB_METADATA_COL}->>'enabled' FROM {DB_TABLE} WHERE {DB_METADATA_COL}->>'source' = :s LIMIT 1"),
+                    {"s": source},
+                ).fetchone()
+                if not cur_r:
+                    engine.dispose()
+                    return JSONResponse({"error": "文档不存在"}, status_code=404)
+                enabled = not (cur_r[0] == "true" or cur_r[0] == "True")
+
+            conn.execute(
+                text(f"UPDATE {DB_TABLE} SET {DB_METADATA_COL} = jsonb_set({DB_METADATA_COL}, '{{\"enabled\"}}', CAST(:val AS jsonb)) WHERE {DB_METADATA_COL}->>'source' = :s"),
+                {"val": str(enabled).lower(), "s": source},
+            )
+            conn.commit()
+        engine.dispose()
+        _audit("toggle_doc", "document", source, {"enabled": enabled})
+        return {"status": "ok", "source": source, "enabled": enabled}
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@router.put("/knowledge/toggle-batch", summary="批量切换文档启用/禁用")
+async def toggle_documents_batch(request: Request):
+    """批量切换: {sources: [...], enabled: bool}。"""
+    try:
+        body = await request.json()
+        sources = body.get("sources", [])
+        enabled = body.get("enabled", True)
+    except Exception:
+        return JSONResponse({"error": "无效的 JSON 请求体"}, status_code=400)
+
+    if not sources:
+        return JSONResponse({"error": "未提供 sources"}, status_code=400)
+
+    try:
+        engine = create_engine(DB_CONNECTION)
+        updated = 0
+        with engine.connect() as conn:
+            for src in sources:
+                result = conn.execute(
+                    text(f"UPDATE {DB_TABLE} SET {DB_METADATA_COL} = jsonb_set({DB_METADATA_COL}, '{{\"enabled\"}}', CAST(:val AS jsonb)) WHERE {DB_METADATA_COL}->>'source' = :s"),
+                    {"val": str(enabled).lower(), "s": src},
+                )
+                updated += result.rowcount
+            conn.commit()
+        engine.dispose()
+        _audit("toggle_doc_batch", "document", ",".join(sources[:10]), {"enabled": enabled, "total": len(sources)})
+        return {"status": "ok", "updated": updated, "total": len(sources)}
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+# ── 文档元数据 ──
+
+@router.get("/knowledge/{source}/metadata", summary="获取文档完整元数据")
+async def get_document_metadata(source: str):
+    """获取文档的完整元数据信息。"""
+    try:
+        engine = create_engine(DB_CONNECTION)
+        with engine.connect() as conn:
+            # 获取第一条切片的 metadata（所有切片共享 source 的元数据字段）
+            row = conn.execute(
+                text(f"SELECT {DB_METADATA_COL}, c_document FROM {DB_TABLE} WHERE {DB_METADATA_COL}->>'source' = :s LIMIT 1"),
+                {"s": source},
+            ).fetchone()
+            if not row:
+                engine.dispose()
+                return JSONResponse({"error": "文档不存在"}, status_code=404)
+
+            meta = row[0] or {}
+            # 统计切片数
+            count_r = conn.execute(
+                text(f"SELECT COUNT(*) FROM {DB_TABLE} WHERE {DB_METADATA_COL}->>'source' = :s"),
+                {"s": source},
+            ).fetchone()
+        engine.dispose()
+
+        kb_id = meta.get("kb_id", "default")
+        kb_name = ""
+        try:
+            eng2 = create_engine(DB_CONNECTION)
+            with eng2.connect() as c2:
+                kb_r = c2.execute(text(f"SELECT name FROM {DB_KB_TABLE} WHERE id = :i"), {"i": kb_id}).fetchone()
+                if kb_r:
+                    kb_name = kb_r[0]
+            eng2.dispose()
+        except Exception:
+            pass
+
+        # 解析 tags（可能是 JSON 字符串或 Python list）
+        tags = meta.get("tags", [])
+        if isinstance(tags, str):
+            try:
+                tags = json.loads(tags)
+            except Exception:
+                tags = [tags] if tags else []
+
+        return {
+            "source": source,
+            "filename": meta.get("filename", ""),
+            "kb_id": kb_id,
+            "kb_name": kb_name,
+            "enabled": meta.get("enabled", True) if isinstance(meta.get("enabled"), bool) else str(meta.get("enabled", "true")).lower() == "true",
+            "tags": tags if isinstance(tags, list) else [],
+            "region_code": meta.get("region_code", ""),
+            "chunks": count_r[0] if count_r else 0,
+            "created_at": meta.get("created_at", ""),
+            "chunk_id": meta.get("chunk_id", ""),
+        }
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@router.put("/knowledge/{source}/metadata", summary="更新文档元数据")
+async def update_document_metadata(source: str, request: Request):
+    """更新文档元数据: {kb_id?, tags?}。支持文档迁移和标签编辑。"""
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "无效的 JSON 请求体"}, status_code=400)
+
+    try:
+        engine = create_engine(DB_CONNECTION)
+        with engine.connect() as conn:
+            # 更新 kb_id
+            if "kb_id" in body:
+                new_kb_id = body["kb_id"]
+                # 文档池（空字符串）跳过 KB 存在性检查
+                if new_kb_id:
+                    kb_check = conn.execute(
+                        text(f"SELECT id FROM {DB_KB_TABLE} WHERE id = :i"), {"i": new_kb_id}
+                    ).fetchone()
+                    if not kb_check:
+                        engine.dispose()
+                        return JSONResponse({"error": f"目标知识库 '{new_kb_id}' 不存在"}, status_code=400)
+
+                conn.execute(
+                    text(f"UPDATE {DB_TABLE} SET {DB_METADATA_COL} = jsonb_set({DB_METADATA_COL}, '{{\"kb_id\"}}', CAST(:val AS jsonb)) WHERE {DB_METADATA_COL}->>'source' = :s"),
+                    {"val": f'"{new_kb_id}"', "s": source},
+                )
+
+            # 更新 tags
+            if "tags" in body:
+                tags_val = body["tags"]
+                if not isinstance(tags_val, list):
+                    tags_val = [tags_val]
+                conn.execute(
+                    text(f"UPDATE {DB_TABLE} SET {DB_METADATA_COL} = jsonb_set({DB_METADATA_COL}, '{{\"tags\"}}', CAST(:val AS jsonb)) WHERE {DB_METADATA_COL}->>'source' = :s"),
+                    {"val": json.dumps(tags_val, ensure_ascii=False), "s": source},
+                )
+
+            conn.commit()
+        engine.dispose()
+        _audit("update_metadata", "document", source, body)
+        return {"status": "ok", "source": source}
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
 
 # ═══════════════════════════════════════════════════════════════
 # 权限过滤预留口子:

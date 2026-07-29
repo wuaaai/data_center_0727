@@ -101,7 +101,8 @@ def extract_images_from_paragraph(paragraph):
 
 
 # ---------- 文档处理 ----------
-def read_and_process_word(file_path, source_id=None, original_filename=None):
+def read_and_process_word(file_path, source_id=None, original_filename=None,
+                          kb_id="default", region_code="000000", tags=None):
     try:
         doc = DocxDocument(file_path)
         file_name = os.path.basename(file_path)
@@ -146,8 +147,12 @@ def read_and_process_word(file_path, source_id=None, original_filename=None):
                     "type": "child_chunk",
                     "recall_context": full_parent_context,
                     "chunk_id": f"{file_name}_p{p_idx}_c{c_idx}",
-                    "region_code": region_mapping.get(file_name, "000000"),
+                    "region_code": region_code,
                     "created_at": time.time(),
+                    # 新增: 多知识库支持
+                    "kb_id": kb_id if kb_id is not None else "default",
+                    "enabled": True,
+                    "tags": tags or [],
                 }
                 new_doc = Document(page_content=content_to_vectorize, metadata=metadata)
                 docs_to_save.append(new_doc)
@@ -162,7 +167,7 @@ def read_and_process_word(file_path, source_id=None, original_filename=None):
 
 
 # ---------- 入库 ----------
-def ingest(file_path, source_id=None):
+def ingest(file_path, source_id=None, kb_id="default", region_code="000000", tags=None):
     if not os.path.exists(file_path):
         print(f"文件不存在: {file_path}")
         return
@@ -182,9 +187,17 @@ def ingest(file_path, source_id=None):
             job = jobs.get(source_id)
             if job and job.get("filename"):
                 original_filename = job["filename"]
+            # 如果 CLI 没传 kb_id/region_code，从 job 记录中读取
+            if kb_id == "default" and job and job.get("kb_id"):
+                kb_id = job["kb_id"]
+            if region_code == "000000" and job and job.get("region_code"):
+                region_code = job["region_code"]
+            if tags is None and job and job.get("tags"):
+                tags = job["tags"]
     except Exception:
         pass
     print(f"  原始文档名: {original_filename}")
+    print(f"  kb_id={kb_id}  region_code={region_code}  tags={tags}")
 
     print(f"连接 PostgreSQL 数据库: {COLLECTION_NAME} (维度: 1024)")
     # 解析 DB_CONNECTION 为 psycopg2 格式
@@ -201,17 +214,21 @@ def ingest(file_path, source_id=None):
     )
     cur = conn.cursor()
 
-    # 1) 按 source_id 删除旧切片
+    # 1) 按 source_id + kb_id 精确删除旧切片（避免跨 KB 误删）
     try:
-        cur.execute("DELETE FROM parent_child_db_1024 WHERE c_metadata->>'source' = %s", (source_id,))
+        cur.execute(
+            "DELETE FROM parent_child_db_1024 WHERE c_metadata->>'source' = %s AND c_metadata->>'kb_id' = %s",
+            (source_id, kb_id)
+        )
         deleted = cur.rowcount
         conn.commit()
-        print(f"已清理旧切片 (source={source_id}, 删除{deleted}条)")
+        print(f"已清理旧切片 (source={source_id}, kb_id={kb_id}, 删除{deleted}条)")
     except Exception as e:
         conn.rollback()
         print(f"清理旧切片跳过: {e}")
 
-    docs = read_and_process_word(file_path, source_id=source_id, original_filename=original_filename)
+    docs = read_and_process_word(file_path, source_id=source_id, original_filename=original_filename,
+                                 kb_id=kb_id, region_code=region_code, tags=tags)
     print(f"  - {file_name}: 生成 {len(docs)} 个切片")
 
     if docs:
@@ -248,8 +265,17 @@ def ingest(file_path, source_id=None):
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("用法: python rag_ingest.py <file_path> [source_id]")
-        print("示例: python rag_ingest.py D:/path/to/file.docx abc123")
+        print("用法: python rag_ingest.py <file_path> <source_id> [kb_id] [region_code] [tags_json]")
+        print("示例: python rag_ingest.py D:/path/to/file.docx abc123 kb_budget 1301000 '[\"预算\",\"2026\"]'")
         sys.exit(1)
     src_id = sys.argv[2] if len(sys.argv) > 2 else None
-    ingest(sys.argv[1], source_id=src_id)
+    kb_id = sys.argv[3] if len(sys.argv) > 3 else "default"
+    region_code = sys.argv[4] if len(sys.argv) > 4 else "000000"
+    tags = None
+    if len(sys.argv) > 5:
+        import json
+        try:
+            tags = json.loads(sys.argv[5])
+        except Exception:
+            tags = None
+    ingest(sys.argv[1], source_id=src_id, kb_id=kb_id, region_code=region_code, tags=tags)
