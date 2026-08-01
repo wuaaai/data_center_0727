@@ -33,11 +33,13 @@ const kbForm = ref({ id: '', name: '', description: '' }); const kbFormSaving = 
 const metadataVisible = ref(false); const metadataSource = ref('')
 const metadata = ref({}); const metadataTagsInput = ref('')
 const metadataEditingTags = ref(false); const metadataEditingKb = ref(false); const metadataSelectedKbId = ref(''); const metadataSaving = ref(false)
-const uploadTargetKb = ref('')  // 上传弹窗 KB 选择器（''=文档池）
-const uploadTagsInput = ref('')  // 上传弹窗标签输入
-const ingestDialogVisible = ref(false); const ingestTargetJob = ref(null); const ingestTargetKbIds = ref([])
+const uploadFileTags = ref({})  // 上传弹窗每文件标签（key=文件名）
+const ingestDialogVisible = ref(false); const ingestTargetJob = ref(null); const ingestTargetKbIds = ref([]); const ingestLoading = ref(false)
+const unloadDialogVisible = ref(false); const unloadTargetJob = ref(null); const unloadTargetKbs = ref([]); const unloadLoading = ref(false)
 const poolDocCount = ref(0); const poolChunkCount = ref(0)
-const poolAssignVisible = ref(false); const poolAssignSources = ref([]); const poolAssignTargetKbs = ref([])
+const poolAssignVisible = ref(false); const poolAssignSources = ref([]); const poolAssignTargetKbs = ref([]); const poolAssignLoading = ref(false)
+const addFromPoolVisible = ref(false); const addFromPoolSelections = ref([]); const addFromPoolDocs = ref([])
+const uploadConfig = ref({ max_upload_files: 20, max_file_size_mb: 200 })
 
 const enabledFilter = ref('')
 
@@ -65,7 +67,25 @@ async function loadKnowledgeBase() {
     if (selectedKbId.value === '__pool__') params.kb_id = '__pool__'
     else if (selectedKbId.value && selectedKbId.value !== '__all__') params.kb_id = selectedKbId.value
     if (enabledFilter.value && selectedKbId.value !== '__pool__' && selectedKbId.value !== '__all__') params.enabled = enabledFilter.value
-    knowledgeData.value = await getKnowledgeBase(params)
+    const data = await getKnowledgeBase(params)
+    // 总览视图合并多KB同文档为一行
+    if (selectedKbId.value === '__all__' && data.files) {
+      const merged = new Map()
+      for (const f of data.files) {
+        const key = f.source
+        if (merged.has(key)) {
+          const exist = merged.get(key)
+          exist.chunks += f.chunks
+          exist.kb_names.push(f.kb_id === '' || !f.kb_id ? '文档池' : (kbOptions.value.find(k => k.value === f.kb_id)?.name || f.kb_id))
+        } else {
+          f.kb_names = [f.kb_id === '' || !f.kb_id ? '文档池' : (kbOptions.value.find(k => k.value === f.kb_id)?.name || f.kb_id)]
+          merged.set(key, f)
+        }
+      }
+      data.files = [...merged.values()]
+      data.total_files = data.files.length
+    }
+    knowledgeData.value = data
   } catch (e) { console.error(e) }
 }
 
@@ -125,24 +145,24 @@ function startPolling(jobIds) {
   }, 5000)
 }
 function stopPolling() { if (pollingTimer.value) { clearInterval(pollingTimer.value); pollingTimer.value = null } }
-function openUploadDialog() { uploadFiles.value = []; uploadFileRegions.value = {}; uploadTagsInput.value = ''; if (fileInput.value) fileInput.value.value = ''; uploadVisible.value = true }
+function openUploadDialog() { uploadFiles.value = []; uploadFileRegions.value = {}; uploadFileTags.value = {}; if (fileInput.value) fileInput.value.value = ''; uploadVisible.value = true }
 function onFileChange(e) {
   const newFiles = [...(e.target.files || [])]; if (newFiles.length === 0) return
   const existingKeys = new Set(uploadFiles.value.map(f => `${f.name}|${f.size}|${f.lastModified}`))
   const added = newFiles.filter(f => !existingKeys.has(`${f.name}|${f.size}|${f.lastModified}`))
   if (added.length === 0) { ElMessage.info('文件已在列表中'); return }
-  if (uploadFiles.value.length + added.length > 20) { ElMessage.warning(`最多20个文件，当前已有${uploadFiles.value.length}个`); return }
+  if (uploadFiles.value.length + added.length > uploadConfig.value.max_upload_files) { ElMessage.warning(`最多${uploadConfig.value.max_upload_files}个文件，当前已有${uploadFiles.value.length}个`); return }
   uploadFiles.value = [...uploadFiles.value, ...added]; e.target.value = ''
 }
-function removeFile(index) { const f = uploadFiles.value[index]; delete uploadFileRegions.value[f._originalName || f.name]; uploadFiles.value.splice(index, 1) }
+function removeFile(index) { const f = uploadFiles.value[index]; const key = f._originalName || f.name; delete uploadFileRegions.value[key]; delete uploadFileTags.value[key]; uploadFiles.value.splice(index, 1) }
 async function confirmUpload() {
   if (uploading.value) return
   if (uploadFiles.value.length === 0) { ElMessage.warning('请选择要上传的文档'); return }
-  const missing = uploadFiles.value.filter(f => !uploadFileRegions.value[f.name])
+  const missing = uploadFiles.value.filter(f => !uploadFileRegions.value[f._originalName || f.name])
   if (missing.length > 0) { ElMessage.warning(`请为以下文档选择所属地区: ${missing.map(f => f.name).join('、')}`); return }
   const existingInKB = new Set(knowledgeData.value.files.map(f => f.filename))
   const activeJobNames = new Set(jobs.value.filter(j => ['processing','queued','ingesting','uploaded'].includes(j.status)).map(j => j.filename))
-  const allExistingNames = new Set([...existingInKB, ...activeJobNames, ...jobs.value.filter(j => j.status === 'completed').map(j => j.filename)])
+  const allExistingNames = new Set([...existingInKB, ...activeJobNames, ...jobs.value.filter(j => j.status === 'completed' || j.status === 'ingested').map(j => j.filename)])
   const inProgress = uploadFiles.value.filter(f => activeJobNames.has(f.name))
   if (inProgress.length > 0) { ElMessage.warning(`以下文档正在处理中：${inProgress.map(f => f.name).join('、')}`); return }
   // 自动重名处理：给文件名加递增序号
@@ -172,17 +192,24 @@ async function confirmUpload() {
   }
   uploading.value = true; const results = []; let errorCount = 0
   try {
-    for (const f of uploadFiles.value) {
+    // 并行上传，限制并发数 MAX_C=5
+    const uploadTasks = uploadFiles.value.map(f => {
       const uploadFile = f._uploadName ? new File([f], f._uploadName, { type: f.type }) : f
       const fd = new FormData(); fd.append('files', uploadFile)
       const origName = f._originalName || f.name
       const r = uploadFileRegions.value[origName] || ''; if (r) fd.append('region_code', r)
-      fd.append('kb_id', uploadTargetKb.value)  // 始终传入 kb_id（空字符串=文档池）
-      const tags = uploadTagsInput.value.split(',').map(t => t.trim()).filter(Boolean)
-      if (tags.length > 0) fd.append('tags', JSON.stringify(tags))
-      const res = await uploadRagFile(fd)
-      if (res.jobs) { results.push(...res.jobs); startPolling(res.jobs.map(j => j.job_id)) }
-      if (res.errors) { res.errors.forEach(e => { ElMessage.error(`${e.filename}: ${e.error}`); errorCount++ }) }
+      fd.append('kb_id', '')  // 默认文档池
+      const fileTags = (uploadFileTags.value[origName] || '').split(',').map(t => t.trim()).filter(Boolean)
+      if (fileTags.length > 0) fd.append('tags', JSON.stringify(fileTags))
+      return uploadRagFile(fd)
+    })
+    const MAX_C = 5
+    for (let i = 0; i < uploadTasks.length; i += MAX_C) {
+      const batchRes = await Promise.all(uploadTasks.slice(i, i + MAX_C))
+      for (const res of batchRes) {
+        if (res.jobs) { results.push(...res.jobs); startPolling(res.jobs.map(j => j.job_id)) }
+        if (res.errors) { res.errors.forEach(e => { ElMessage.error(`${e.filename}: ${e.error}`); errorCount++ }) }
+      }
     }
     if (results.length > 0) { ElMessage.success(`已提交 ${results.length} 个文档${errorCount > 0 ? `，${errorCount} 个失败` : ''}`); uploadVisible.value = false; setTimeout(async () => { await loadJobs() }, 2000) }
   } catch (e) { ElMessage.error('上传失败: ' + e.message) } finally { uploading.value = false }
@@ -217,36 +244,91 @@ async function handleDelete(job) {
 function openIngestDialog(job) { ingestTargetJob.value = job; ingestTargetKbIds.value = job.kb_id && job.kb_id !== '' ? [job.kb_id] : []; ingestDialogVisible.value = true }
 async function confirmIngest() {
   if (!ingestTargetJob.value) return
-  if (ingestTargetKbIds.value.length === 0) { ElMessage.warning('请选择至少一个知识库'); return }
+  ingestLoading.value = true
   try {
-    for (const kbId of ingestTargetKbIds.value) { await ingestRagJob(ingestTargetJob.value.id, { kb_id: kbId }) }
-    ElMessage.success(`已入库到 ${ingestTargetKbIds.value.length} 个知识库`); ingestDialogVisible.value = false; await loadAll()
+    if (ingestTargetKbIds.value.length === 0) {
+      // 未选知识库 → 入库到文档池（写入向量库但 kb_id 为空）
+      await ingestRagJob(ingestTargetJob.value.id, { kb_id: '' })
+      ElMessage.success('已入库到文档池')
+    } else {
+      for (const kbId of ingestTargetKbIds.value) { await ingestRagJob(ingestTargetJob.value.id, { kb_id: kbId }) }
+      ElMessage.success(`已入库到 ${ingestTargetKbIds.value.length} 个知识库`)
+    }
+    ingestDialogVisible.value = false; await loadAll()
   } catch (e) { ElMessage.error('入库失败: ' + (e.message || e)) }
+  finally { ingestLoading.value = false }
 }
 function openPoolAssign(sources) { poolAssignSources.value = Array.isArray(sources) ? sources : [sources]; poolAssignTargetKbs.value = []; poolAssignVisible.value = true }
-async function confirmPoolAssign() {
-  if (poolAssignTargetKbs.value.length === 0) { ElMessage.warning('请选择至少一个知识库'); return }
+async function openAddFromPool() {
+  addFromPoolSelections.value = []; addFromPoolVisible.value = true
   try {
+    const B = import.meta.env.VITE_API_BASE_URL || window.location.origin
+    const res = await fetch(B + '/ragdata/knowledge?kb_id=__pool__&sort=time').then(r => r.json())
+    addFromPoolDocs.value = res.files || []
+  } catch (e) { ElMessage.error('加载文档池失败'); addFromPoolVisible.value = false }
+}
+async function confirmAddFromPool() {
+  if (addFromPoolSelections.value.length === 0) { ElMessage.warning('请选择要添加的文档'); return }
+  if (!selectedKbId.value) return
+  try {
+    for (const src of addFromPoolSelections.value) {
+      await updateDocMetadata(src, { kb_id: selectedKbId.value })
+    }
+    ElMessage.success(`已将 ${addFromPoolSelections.value.length} 个文档添加到知识库`)
+    addFromPoolVisible.value = false
+    await Promise.all([loadKnowledgeBase(), loadKnowledgeBases()])
+  } catch (e) { ElMessage.error('添加失败: ' + (e.message || e)) }
+}
+async function confirmPoolAssign() {
+  poolAssignLoading.value = true
+  try {
+    const isEmpty = poolAssignTargetKbs.value.length === 0
     for (const src of poolAssignSources.value) {
       if (selectedKbId.value === '__pool__') {
-        // 池分配：第一个 KB 改 metadata，其余 KB 重新入库创建副本
+        // 池分配：必须有选 KB
+        if (isEmpty) continue
         await updateDocMetadata(src, { kb_id: poolAssignTargetKbs.value[0] })
         for (let i = 1; i < poolAssignTargetKbs.value.length; i++) {
           const job = jobs.value.find(j => j.id === src)
           if (job && job.output_path) { await ingestRagJob(src, { kb_id: poolAssignTargetKbs.value[i] }) }
         }
       } else {
-        // 总览/KB 迁移：逐个改 metadata kb_id（如需多 KB 副本，请用入库功能）
-        for (const kbId of poolAssignTargetKbs.value) {
-          await updateDocMetadata(src, { kb_id: kbId })
+        // 总览/KB 加入：不选 KB 则移回文档池，选了则改 kb_id（仅移动，非复制）
+        if (isEmpty) {
+          await updateDocMetadata(src, { kb_id: '' })
+        } else {
+          for (const kbId of poolAssignTargetKbs.value) {
+            await updateDocMetadata(src, { kb_id: kbId })
+          }
         }
       }
     }
-    ElMessage.success(`已完成 ${poolAssignSources.value.length} 个文档的操作`); poolAssignVisible.value = false
+    const msg = isEmpty ? '已移回文档池' : `已完成 ${poolAssignSources.value.length} 个文档的操作`
+    ElMessage.success(msg); poolAssignVisible.value = false
     await Promise.all([loadKnowledgeBase(), loadKnowledgeBases()])
-  } catch (e) { ElMessage.error('分配失败: ' + (e.message || e)) }
+  } catch (e) { ElMessage.error('操作失败: ' + (e.message || e)) }
+  finally { poolAssignLoading.value = false }
 }
-async function handleUnload(job) { try { await ElMessageBox.confirm(`确定从知识库中移除 "${job.filename}" 吗？`, '确认出库', { type: 'warning', confirmButtonText: '移除', cancelButtonText: '取消' }); const res = await unloadRagJob(job.id); ElMessage.success(res.message || '已移除'); await loadAll() } catch (e) { if (e !== 'cancel') ElMessage.error('出库失败: ' + (e.message || e)) } }
+function openUnloadDialog(job) {
+  unloadTargetJob.value = job; unloadTargetKbs.value = []; unloadDialogVisible.value = true
+}
+async function confirmUnload() {
+  if (!unloadTargetJob.value) return
+  unloadLoading.value = true
+  try {
+    if (unloadTargetKbs.value.length === 0) {
+      if (await ElMessageBox.confirm('未选择知识库，将移除全部副本，确定？', '确认出库', { type: 'warning', confirmButtonText: '全部移除', cancelButtonText: '取消' }).catch(() => false)) {
+        await unloadRagJob(unloadTargetJob.value.id)
+        ElMessage.success('已从所有知识库移除')
+      } else { unloadLoading.value = false; return }
+    } else {
+      for (const kbId of unloadTargetKbs.value) { await unloadRagJob(unloadTargetJob.value.id, { kb_id: kbId }) }
+      ElMessage.success(`已从 ${unloadTargetKbs.value.length} 个知识库移除`)
+    }
+    unloadDialogVisible.value = false; await loadAll()
+  } catch (e) { ElMessage.error('出库失败: ' + (e.message || e)) }
+  finally { unloadLoading.value = false }
+}
 async function showPreview(job) { previewJob.value = job; previewVisible.value = true; previewLoading.value = true; try { const B = import.meta.env.VITE_API_BASE_URL || window.location.origin; const res = await fetch(`${B}/ragdata/jobs/${job.id}`).then(r => r.json()); previewText.value = res.preview_text || '暂无预览内容' } catch (e) { previewText.value = '加载预览失败' } finally { previewLoading.value = false } }
 async function previewKnowledgeDoc(source) { previewJob.value = { filename: source }; previewVisible.value = true; previewLoading.value = true; try { const B = import.meta.env.VITE_API_BASE_URL || window.location.origin; const res = await fetch(`${B}/ragdata/knowledge/chunks?source=${encodeURIComponent(source)}`).then(r => r.json()); previewText.value = (res.chunks || []).map(c => c.content || '').join('\n---\n') || '暂无内容' } catch (e) { previewText.value = '加载预览失败' } finally { previewLoading.value = false } }
 async function editRegion(row) { regionEditSource.value = row.source; regionEditFilename.value = row.filename; regionEditCode.value = ""; try { const B = import.meta.env.VITE_API_BASE_URL || window.location.origin; const res = await fetch(B + "/ragdata/region-permission?source=" + encodeURIComponent(row.source)).then(r => r.json()); regionEditCode.value = res.region_code || "" } catch (e) {}; regionEditVisible.value = true }
@@ -291,8 +373,9 @@ async function deleteKb(kb) {
 }
 
 async function handleToggleEnabled(row) {
-  try { await toggleDocEnabled(row.source, !row.enabled); row.enabled = !row.enabled; ElMessage.success(row.enabled ? '已启用' : '已禁用') }
-  catch (e) { ElMessage.error(e.message || '操作失败') }
+  const original = !row.enabled  // v-model 已翻转，回退到原值用于出错恢复
+  try { await toggleDocEnabled(row.source, row.enabled); ElMessage.success(row.enabled ? '已启用' : '已禁用') }
+  catch (e) { row.enabled = original; ElMessage.error(e.message || '操作失败') }  // API失败时回退
 }
 
 async function openMetadata(source) {
@@ -330,6 +413,8 @@ onMounted(async () => {
   getRegions().then(d => { regionOptions.value = (d.regions || []).map(r => ({ value: r.code, label: r.name })) }).catch(e => console.error(e))
   const active = jobs.value.filter(j => ['processing','queued','ingesting'].includes(j.status))
   if (active.length > 0) startPolling(active.map(j => j.id))
+  // 从后端动态读取上传限制
+  try { const B = import.meta.env.VITE_API_BASE_URL || window.location.origin; const d = await fetch(B + '/ragdata/stats').then(r => r.json()); if (d.max_upload_files) uploadConfig.value = d } catch (e) {}
 })
 </script>
 <template>
@@ -369,28 +454,28 @@ onMounted(async () => {
       <div v-if="kbOptions.length===0" style="text-align:center;padding:60px"><p style="color:#64748b">暂无知识库</p></div>
       <div v-else class="kb-card-grid">
         <div class="kb-card overview-card" @click="onKbChange('__all__')">
-          <div class="kb-card-icon">📋</div>
           <div class="kb-card-body">
             <div class="kb-card-name">总览</div>
             <div class="kb-card-meta">全部文档 · {{ kbOptions.reduce((s,k)=>s+(k.document_count||0),0) + poolDocCount }} 文档</div>
           </div>
-          <div class="kb-card-arrow">›</div>
+          <div class="kb-card-arrow">&gt;</div>
         </div>
         <div class="kb-card pool-card" @click="onKbChange('__pool__')">
-          <div class="kb-card-icon">📦</div>
           <div class="kb-card-body">
             <div class="kb-card-name">文档池</div>
             <div class="kb-card-meta">待分配 · {{ poolDocCount }} 文档 / {{ poolChunkCount }} 切片</div>
           </div>
-          <div class="kb-card-arrow">›</div>
+          <div class="kb-card-arrow">&gt;</div>
         </div>
         <div v-for="kb in kbOptions" :key="kb.value" class="kb-card" :class="{disabled:!kb.is_active}" @click="kb.is_active ? onKbChange(kb.value) : null">
           <div class="kb-card-icon">📁</div>
           <div class="kb-card-body">
-            <div class="kb-card-name">{{ kb.name }}</div>
+            <div class="kb-card-name">{{ kb.name }}<span v-if="!kb.is_active" style="display:inline-block;margin-left:8px;padding:1px 8px;border-radius:999px;background:#fef2f2;color:#ef4444;font-size:11px;font-weight:600;vertical-align:middle">已停用</span></div>
             <div class="kb-card-meta">{{ kb.document_count||0 }} 文档 · {{ kb.chunk_count||0 }} 切片</div>
           </div>
-          <div class="kb-card-arrow">›</div>
+          <div style="display:flex;align-items:center;gap:6px" @click.stop>
+            <el-switch v-model="kb.is_active" size="small" @change="toggleKbActive(kb)"/>
+          </div>
         </div>
       </div>
     </div>
@@ -402,11 +487,12 @@ onMounted(async () => {
           <div style="display:flex;align-items:center;gap:10px">
             <el-button link size="small" @click="onKbChange('')" style="font-size:18px;padding:0">← 返回</el-button>
             <div>
-              <h3 style="margin-bottom:2px">{{ selectedKbId==='__all__' ? '📋 总览' : (selectedKbId==='__pool__' ? '📦 文档池' : (kbOptions.find(k=>k.value===selectedKbId)?.name || selectedKbId)) }}</h3>
+              <h3 style="margin-bottom:2px">{{ selectedKbId==='__all__' ? '总览' : (selectedKbId==='__pool__' ? '文档池' : (kbOptions.find(k=>k.value===selectedKbId)?.name || selectedKbId)) }}</h3>
               <p style="margin:0">{{ selectedKbId==='__all__' ? '全部知识库 + 文档池' : (selectedKbId==='__pool__' ? '待分配文档' : '') }} · {{ knowledgeData.total_files }} 文档 / {{ knowledgeData.total_chunks }} 切片</p>
             </div>
           </div>
           <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+            <el-button v-if="selectedKbId!=='__pool__'&&selectedKbId!=='__all__'&&poolDocCount>0" type="primary" size="small" @click="openAddFromPool">从文档池添加</el-button>
             <el-select v-if="selectedKbId!=='__pool__'&&selectedKbId!=='__all__'" v-model="enabledFilter" @change="loadKnowledgeBase" clearable placeholder="启用筛选" size="small" style="width:100px"><el-option label="全部" value=""/><el-option label="已启用" value="true"/><el-option label="已禁用" value="false"/></el-select>
             <el-button v-if="selectedDocs.length>0&&selectedKbId==='__pool__'" type="success" size="small" @click="openPoolAssign(selectedDocs.map(d=>d.source))">分配到KB({{selectedDocs.length}})</el-button>
             <el-button v-if="selectedDocs.length>0&&selectedKbId!=='__pool__'" type="danger" :icon="Delete" size="small" @click="batchRemoveDocs">删除({{selectedDocs.length}})</el-button>
@@ -418,21 +504,21 @@ onMounted(async () => {
       <div class="card-panel">
         <div class="table-wrap">
           <el-table :data="filteredKnowledge" class="rag-table" v-loading="loading" @selection-change="(sel)=>selectedDocs=sel">
-            <el-table-column type="selection" width="38"/>
-            <el-table-column type="index" label="#" width="40"/>
-            <el-table-column prop="filename" label="文档名称" min-width="160" show-overflow-tooltip/>
+            <el-table-column type="selection" width="34"/>
+            <el-table-column type="index" label="#" width="42"/>
+            <el-table-column prop="filename" label="文档名称" min-width="150" show-overflow-tooltip/>
             <el-table-column v-if="selectedKbId!=='__all__'" label="启用" width="55" align="center"><template #default="{row}"><el-switch v-model="row.enabled" @change="handleToggleEnabled(row)" size="small"/></template></el-table-column>
-            <el-table-column label="标签" width="100" align="center"><template #default="{row}"><el-tag v-for="(t,i) in (Array.isArray(row.tags)?row.tags.slice(0,2):[])" :key="i" size="small" style="margin:1px;font-size:11px">{{t}}</el-tag><span v-if="Array.isArray(row.tags)&&row.tags.length>2" class="text-muted" style="font-size:11px">+{{row.tags.length-2}}</span></template></el-table-column>
-            <el-table-column label="时间" width="125" align="center"><template #default="{row}"><span class="text-muted" style="font-size:12px">{{row.last_ingest?new Date(Number(row.last_ingest)*1000).toLocaleDateString():'-'}}</span></template></el-table-column>
-            <el-table-column label="地区" width="95" align="center"><template #default="{row}"><span class="text-muted">{{row.region_name||row.region_code||'-'}}</span></template></el-table-column>
-            <el-table-column v-if="selectedKbId==='__all__'" label="所属知识库" width="110" align="center"><template #default="{row}"><span class="text-muted">{{row.kb_id===''||!row.kb_id?'文档池':(kbOptions.find(k=>k.value===row.kb_id)?.name||row.kb_id)}}</span></template></el-table-column>
-            <el-table-column label="切片" width="55" align="center"><template #default="{row}"><span class="text-muted">{{row.chunks||0}}</span></template></el-table-column>
+            <el-table-column label="标签" width="90" align="center"><template #default="{row}"><span v-if="!Array.isArray(row.tags)||row.tags.length===0" class="text-muted" style="font-size:11px">-</span><el-tag v-for="(t,i) in (Array.isArray(row.tags)?row.tags.slice(0,2):[])" :key="i" size="small" style="margin:1px;font-size:11px">{{t}}</el-tag><span v-if="Array.isArray(row.tags)&&row.tags.length>2" class="text-muted" style="font-size:11px">+{{row.tags.length-2}}</span></template></el-table-column>
+            <el-table-column label="时间" width="105" align="center"><template #default="{row}"><span class="text-muted" style="font-size:11px">{{row.last_ingest?new Date(Number(row.last_ingest)*1000).toLocaleDateString():'-'}}</span></template></el-table-column>
+            <el-table-column label="地区" width="85" align="center"><template #default="{row}"><span class="text-muted" style="font-size:12px">{{row.region_name||row.region_code||'-'}}</span></template></el-table-column>
+            <el-table-column v-if="selectedKbId==='__all__'" label="所属知识库" width="130" align="center"><template #default="{row}"><div style="display:flex;flex-wrap:wrap;gap:2px;justify-content:center"><el-tag v-for="(kn,i) in (row.kb_names||[]).filter(Boolean)" :key="i" size="small" style="font-size:10px;max-width:90px">{{kn}}</el-tag></div></template></el-table-column>
+            <el-table-column label="切片" width="50" align="center"><template #default="{row}"><span class="text-muted">{{row.chunks||0}}</span></template></el-table-column>
             <el-table-column label="操作" :width="selectedKbId==='__all__'?220:260" align="center" fixed="right">
               <template #default="{row}">
                 <el-button v-if="selectedKbId!=='__all__'" type="info" link size="small" @click="openMetadata(row.source)"><el-icon><View/></el-icon></el-button>
                 <el-button type="primary" link size="small" @click="previewKnowledgeDoc(row.source)">预览</el-button>
                 <el-button v-if="selectedKbId==='__pool__'" type="success" link size="small" @click="openPoolAssign(row.source)">分配</el-button>
-                <el-button v-else type="warning" link size="small" @click="openPoolAssign(row.source)">迁移</el-button>
+                <el-button v-else type="warning" link size="small" @click="openPoolAssign(row.source)">加入</el-button>
                 <el-button v-if="selectedKbId!=='__pool__'" type="warning" link size="small" @click="editRegion(row)"><el-icon><Edit/></el-icon></el-button>
                 <el-button type="danger" link size="small" @click="removeDocBySource(row.source)"><el-icon><Delete/></el-icon></el-button>
             </template>
@@ -474,7 +560,7 @@ onMounted(async () => {
               <el-button v-if="row.status==='completed'||row.status==='ingested'" type="info" link size="small" @click="showPreview(row)"><el-icon><View/></el-icon></el-button>
               <el-button v-if="row.status==='completed'||row.status==='ingested'" type="primary" link size="small" @click="downloadRagJob(row.id)"><el-icon><Download/></el-icon></el-button>
               <el-button v-if="row.status==='completed'" type="success" link size="small" @click="openIngestDialog(row)"><el-icon><Check/></el-icon></el-button>
-              <el-button v-if="row.status==='ingested'" type="warning" link size="small" @click="handleUnload(row)"><el-icon><Close/></el-icon></el-button>
+              <el-button v-if="row.status==='ingested'" type="warning" link size="small" @click="openUnloadDialog(row)"><el-icon><Close/></el-icon></el-button>
               <el-button type="danger" link size="small" @click="handleDelete(row)"><el-icon><Delete/></el-icon></el-button>
             </div></template>
           </el-table-column>
@@ -486,18 +572,9 @@ onMounted(async () => {
     <!-- ═══ 上传弹窗 ═══ -->
     <el-dialog v-model="uploadVisible" title="上传文档" width="540px" :close-on-click-modal="false" destroy-on-close>
       <div class="upload-dialog-body">
-        <div class="upload-dialog-section"><div class="section-label">目标知识库</div>
-          <el-select v-model="uploadTargetKb" placeholder="选择知识库" style="width:100%">
-            <el-option label="📦 文档池（暂不分配）" value=""/>
-            <el-option v-for="kb in kbOptions" :key="kb.value" :label="kb.name" :value="kb.value"/>
-          </el-select>
-        </div>
-        <div class="upload-dialog-section"><div class="section-label">标签（逗号分隔，可选）</div>
-          <el-input v-model="uploadTagsInput" placeholder="如：预算,2026,邯郸" size="small"/>
-        </div>
         <div class="upload-dialog-section"><div class="section-label">选择文档</div>
-        <div class="upload-file-area" @click="fileInput?.click()"><el-icon :size="36" color="#94a3b8"><Upload/></el-icon><p>点击选择 PDF / DOCX / DOC 文件</p><p class="section-hint">最多20个，单个≤200MB</p><input ref="fileInput" type="file" accept=".pdf,.docx,.doc" multiple style="display:none" @change="onFileChange"/></div>
-        <div v-if="uploadFiles.length>0" class="file-list"><div v-for="(f,i) in uploadFiles" :key="i" class="file-item"><span>{{f._uploadName||f.name}}</span><el-select :model-value="uploadFileRegions[f._originalName||f.name]||''" @update:model-value="(val)=>{const k=f._originalName||f.name; uploadFileRegions[k]=val||''}" placeholder="选择地区*" size="small" style="width:150px" clearable><el-option v-for="r in regionOptions" :key="r.value" :label="r.label" :value="r.value"/></el-select><el-button type="danger" link size="small" @click="removeFile(i)"><el-icon><Close/></el-icon></el-button></div></div>
+        <div class="upload-file-area" @click="fileInput?.click()"><el-icon :size="36" color="#94a3b8"><Upload/></el-icon><p>点击选择 PDF / DOCX / DOC 文件</p><p class="section-hint">最多{{uploadConfig.max_upload_files}}个，单个≤{{uploadConfig.max_file_size_mb}}MB</p><input ref="fileInput" type="file" accept=".pdf,.docx,.doc" multiple style="display:none" @change="onFileChange"/></div>
+        <div v-if="uploadFiles.length>0" class="file-list"><div v-for="(f,i) in uploadFiles" :key="i" class="file-item"><div style="flex:1;min-width:0;display:flex;align-items:center;gap:6px;flex-wrap:wrap"><span style="min-width:80px;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px">{{f._uploadName||f.name}}</span><el-select :model-value="uploadFileRegions[f._originalName||f.name]||''" @update:model-value="(val)=>{const k=f._originalName||f.name; uploadFileRegions[k]=val||''}" placeholder="地区*" size="small" style="width:100px" clearable><el-option v-for="r in regionOptions" :key="r.value" :label="r.label" :value="r.value"/></el-select><el-input :model-value="uploadFileTags[f._originalName||f.name]||''" @update:model-value="(val)=>{const k=f._originalName||f.name; uploadFileTags[k]=val}" placeholder="标签" size="small" style="width:120px"/></div><el-button type="danger" link size="small" @click="removeFile(i)"><el-icon><Close/></el-icon></el-button></div></div>
       </div></div>
       <template #footer><el-button @click="uploadVisible=false" :disabled="uploading">取消</el-button><el-button type="primary" :loading="uploading" @click="confirmUpload">开始上传处理</el-button></template>
     </el-dialog>
@@ -515,7 +592,7 @@ onMounted(async () => {
     <el-dialog v-model="kbManageVisible" title="知识库管理" width="700px" :close-on-click-modal="false" destroy-on-close>
       <div style="margin-bottom:12px"><el-button type="primary" size="small" @click="openKbForm('create')">新建知识库</el-button></div>
       <el-table :data="kbOptions" size="small">
-        <el-table-column label="名称" min-width="160"><template #default="{row}"><span :style="!row.is_active?'color:#94a3b8;font-style:italic':''">{{row.name}}</span></template></el-table-column>
+        <el-table-column label="名称" min-width="160"><template #default="{row}"><span :style="!row.is_active?'color:#94a3b8;font-style:italic':''">{{row.name}}</span><span v-if="!row.is_active" style="display:inline-block;margin-left:6px;padding:0 6px;border-radius:999px;background:#fef2f2;color:#ef4444;font-size:11px;font-weight:600">已停用</span></template></el-table-column>
         <el-table-column label="ID" width="120" align="center"><template #default="{row}"><span class="text-muted" style="font-size:12px">{{row.value}}</span></template></el-table-column>
         <el-table-column label="文档" width="70" align="center"><template #default="{row}">{{row.document_count||0}}</template></el-table-column>
         <el-table-column label="切片" width="70" align="center"><template #default="{row}">{{row.chunk_count||0}}</template></el-table-column>
@@ -537,28 +614,54 @@ onMounted(async () => {
     <el-dialog v-model="ingestDialogVisible" title="入库到知识库" width="460px" :close-on-click-modal="false" destroy-on-close>
       <div v-if="ingestTargetJob" style="display:flex;flex-direction:column;gap:14px">
         <div><div style="font-weight:600;margin-bottom:4px">文档名称</div><div style="color:#64748b">{{ingestTargetJob.filename}}</div></div>
-        <div><div style="font-weight:600;margin-bottom:4px">目标知识库（可多选）</div>
-          <el-select v-model="ingestTargetKbIds" placeholder="选择知识库" style="width:100%" multiple>
-            <el-option label="📦 文档池" value=""/>
+        <div><div style="font-weight:600;margin-bottom:4px">目标知识库（不选则默认文档池）</div>
+          <el-select v-model="ingestTargetKbIds" placeholder="不选则入库到文档池" style="width:100%" multiple>
             <el-option v-for="kb in kbOptions" :key="kb.value" :label="kb.name" :value="kb.value"/>
           </el-select>
         </div>
       </div>
-      <template #footer><el-button @click="ingestDialogVisible=false">取消</el-button><el-button type="primary" @click="confirmIngest">确认入库</el-button></template>
+      <template #footer><el-button @click="ingestDialogVisible=false" :disabled="ingestLoading">取消</el-button><el-button type="primary" :loading="ingestLoading" @click="confirmIngest">确认入库</el-button></template>
     </el-dialog>
 
     <!-- ═══ 池分配/文档迁移弹窗 ═══ -->
-    <el-dialog v-model="poolAssignVisible" :title="selectedKbId==='__pool__'?'分配到知识库':'迁移到知识库'" width="460px" :close-on-click-modal="false" destroy-on-close>
+    <el-dialog v-model="poolAssignVisible" :title="selectedKbId==='__pool__'?'分配到知识库':'加入知识库'" width="460px" :close-on-click-modal="false" destroy-on-close>
       <div style="display:flex;flex-direction:column;gap:14px">
         <div><div style="font-weight:600;margin-bottom:4px">已选文档</div><div style="color:#64748b">{{poolAssignSources.length}} 个文档</div></div>
-        <div><div style="font-weight:600;margin-bottom:4px">目标知识库（可多选）</div>
+        <div><div style="font-weight:600;margin-bottom:4px">目标知识库（不选则默认文档池）</div>
           <el-select v-model="poolAssignTargetKbs" placeholder="选择知识库" style="width:100%" multiple>
-            <el-option label="📦 文档池" value=""/>
             <el-option v-for="kb in kbOptions" :key="kb.value" :label="kb.name" :value="kb.value"/>
           </el-select>
         </div>
       </div>
-      <template #footer><el-button @click="poolAssignVisible=false">取消</el-button><el-button type="primary" @click="confirmPoolAssign">确认</el-button></template>
+      <template #footer><el-button @click="poolAssignVisible=false" :disabled="poolAssignLoading">取消</el-button><el-button type="primary" :loading="poolAssignLoading" @click="confirmPoolAssign">确认</el-button></template>
+    </el-dialog>
+
+    <!-- ═══ 出库弹窗 ═══ -->
+    <el-dialog v-model="unloadDialogVisible" title="从知识库移除" width="460px" :close-on-click-modal="false" destroy-on-close>
+      <div v-if="unloadTargetJob" style="display:flex;flex-direction:column;gap:14px">
+        <div><div style="font-weight:600;margin-bottom:4px">文档名称</div><div style="color:#64748b">{{unloadTargetJob.filename}}</div></div>
+        <div><div style="font-weight:600;margin-bottom:4px">要移除的知识库（不选则全部移除）</div>
+          <el-select v-model="unloadTargetKbs" placeholder="不选则移除全部" style="width:100%" multiple clearable>
+            <el-option v-for="kb in kbOptions" :key="kb.value" :label="kb.name" :value="kb.value"/>
+          </el-select>
+        </div>
+      </div>
+      <template #footer><el-button @click="unloadDialogVisible=false" :disabled="unloadLoading">取消</el-button><el-button type="danger" :loading="unloadLoading" @click="confirmUnload">确认移除</el-button></template>
+    </el-dialog>
+
+    <!-- ═══ 从文档池添加弹窗 ═══ -->
+    <el-dialog v-model="addFromPoolVisible" title="从文档池添加" width="600px" :close-on-click-modal="false" destroy-on-close>
+      <div v-if="addFromPoolDocs.length===0" style="text-align:center;padding:30px;color:#94a3b8">文档池为空</div>
+      <el-table v-else :data="addFromPoolDocs" @selection-change="(sel)=>addFromPoolSelections=sel.map(s=>s.source)" size="small" max-height="360">
+        <el-table-column type="selection" width="40"/>
+        <el-table-column prop="filename" label="文档名称" min-width="180" show-overflow-tooltip/>
+        <el-table-column label="切片" width="60" align="center"><template #default="{row}">{{row.chunks||0}}</template></el-table-column>
+        <el-table-column label="地区" width="100" align="center"><template #default="{row}"><span class="text-muted">{{row.region_name||row.region_code||'-'}}</span></template></el-table-column>
+      </el-table>
+      <template #footer>
+        <el-button @click="addFromPoolVisible=false">取消</el-button>
+        <el-button type="primary" :disabled="addFromPoolSelections.length===0" @click="confirmAddFromPool">添加到当前知识库({{addFromPoolSelections.length}})</el-button>
+      </template>
     </el-dialog>
 
     <!-- ═══ 元数据弹窗 ═══ -->
@@ -585,11 +688,11 @@ onMounted(async () => {
           <div class="meta-row"><span class="meta-label">知识库</span>
             <template v-if="!metadataEditingKb">
               <span>{{metadata.kb_name||metadata.kb_id||'文档池'}}</span>
-              <el-button link size="small" @click="startEditKb">迁移</el-button>
+              <el-button link size="small" @click="startEditKb">加入</el-button>
             </template>
             <template v-else>
               <el-select v-model="metadataSelectedKbId" size="small" style="flex:1">
-                <el-option label="📦 文档池" value=""/>
+                <el-option label="文档池" value=""/>
                 <el-option v-for="kb in kbOptions" :key="kb.value" :label="kb.name" :value="kb.value"/>
               </el-select>
               <el-button type="primary" link size="small" @click="saveMetadata" :loading="metadataSaving">保存</el-button>

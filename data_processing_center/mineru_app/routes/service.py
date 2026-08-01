@@ -1,6 +1,7 @@
 """
 模型服务控制 API — 健康检查、状态查询、模型预热、服务关闭。
 """
+from pathlib import Path
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 from mineru_app.model_manager import model_manager

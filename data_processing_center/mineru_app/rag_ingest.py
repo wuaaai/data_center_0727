@@ -167,7 +167,7 @@ def read_and_process_word(file_path, source_id=None, original_filename=None,
 
 
 # ---------- 入库 ----------
-def ingest(file_path, source_id=None, kb_id="default", region_code="000000", tags=None):
+def ingest(file_path, source_id=None, kb_id="default", region_code="000000", tags=None, original_filename_from_cli=None):
     if not os.path.exists(file_path):
         print(f"文件不存在: {file_path}")
         return
@@ -176,27 +176,28 @@ def ingest(file_path, source_id=None, kb_id="default", region_code="000000", tag
     if source_id is None:
         source_id = file_name
 
-    # 从 job 记录中获取原始中文文档名
-    original_filename = file_name
-    try:
-        import json as _json
-        jobs_file = _PROJECT_ROOT / "output" / "_jobs.json"
-        if jobs_file.exists():
-            with open(jobs_file, "r", encoding="utf-8") as f:
-                jobs = _json.load(f)
-            job = jobs.get(source_id)
-            if job and job.get("filename"):
-                original_filename = job["filename"]
+    # 优先使用 CLI 传入的原始文件名，再查 _jobs.json，最后兜底用文件系统名
+    original_filename = original_filename_from_cli or file_name
+    if not original_filename_from_cli:
+        try:
+            import json as _json
+            jobs_file = _PROJECT_ROOT / "output" / "_jobs.json"
+            if jobs_file.exists():
+                with open(jobs_file, "r", encoding="utf-8") as f:
+                    jobs = _json.load(f)
+                job = jobs.get(source_id)
+                if job and job.get("filename"):
+                    original_filename = job["filename"]
             # 如果 CLI 没传 kb_id/region_code，从 job 记录中读取
-            if kb_id == "default" and job and job.get("kb_id"):
-                kb_id = job["kb_id"]
-            if region_code == "000000" and job and job.get("region_code"):
-                region_code = job["region_code"]
-            if tags is None and job and job.get("tags"):
-                tags = job["tags"]
-    except Exception:
-        pass
-    print(f"  原始文档名: {original_filename}")
+                if kb_id == "default" and job and job.get("kb_id"):
+                    kb_id = job["kb_id"]
+                if region_code == "000000" and job and job.get("region_code"):
+                    region_code = job["region_code"]
+                if tags is None and job and job.get("tags"):
+                    tags = job["tags"]
+        except Exception:
+            pass
+        print(f"  原始文档名: {original_filename}")
     print(f"  kb_id={kb_id}  region_code={region_code}  tags={tags}")
 
     print(f"连接 PostgreSQL 数据库: {COLLECTION_NAME} (维度: 1024)")
@@ -265,8 +266,8 @@ def ingest(file_path, source_id=None, kb_id="default", region_code="000000", tag
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("用法: python rag_ingest.py <file_path> <source_id> [kb_id] [region_code] [tags_json]")
-        print("示例: python rag_ingest.py D:/path/to/file.docx abc123 kb_budget 1301000 '[\"预算\",\"2026\"]'")
+        print("用法: python rag_ingest.py <file_path> <source_id> [kb_id] [region_code] [tags_json] [original_filename]")
+        print("示例: python rag_ingest.py D:/path/to/file.docx abc123 kb_budget 1301000 '[\"预算\",\"2026\"]' '原文件名.docx'")
         sys.exit(1)
     src_id = sys.argv[2] if len(sys.argv) > 2 else None
     kb_id = sys.argv[3] if len(sys.argv) > 3 else "default"
@@ -278,4 +279,6 @@ if __name__ == "__main__":
             tags = json.loads(sys.argv[5])
         except Exception:
             tags = None
-    ingest(sys.argv[1], source_id=src_id, kb_id=kb_id, region_code=region_code, tags=tags)
+    # 第6个参数：原始文件名（直接从后端传入，比查 _jobs.json 更可靠）
+    original_filename_from_cli = sys.argv[6] if len(sys.argv) > 6 else None
+    ingest(sys.argv[1], source_id=src_id, kb_id=kb_id, region_code=region_code, tags=tags, original_filename_from_cli=original_filename_from_cli)

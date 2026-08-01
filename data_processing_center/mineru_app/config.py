@@ -25,3 +25,6 @@ JOB_TIMEOUT_SECONDS = 600  # 10 分钟
 
 # 预览最大行数
 PREVIEW_MAX_LINES = 200
+
+# MinerU 核心代码路径（旧组件兼容）
+MINERU_BASE = PROJECT_ROOT / "mineru_core"

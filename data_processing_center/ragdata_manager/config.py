@@ -55,7 +55,7 @@ MINERU_SITE_PACKAGES = os.getenv("MINERU_SITE_PACKAGES", _default_site)
 # ── MinerU 模型服务地址（8001 后端通过 HTTP 调用 8003）──
 MINERU_SERVICE_URL = os.getenv("MINERU_SERVICE_URL", "http://127.0.0.1:8003")
 # MinerU /file-parse 统一入口（本地开发用）
-MINERU_FILE_PARSE_URL = os.getenv("MINERU_FILE_PARSE_URL", "http://127.0.0.1:8003/file-parse")
+MINERU_FILE_PARSE_URL = os.getenv("MINERU_FILE_PARSE_URL", "http://127.0.0.1:8003/file_parse")
 
 # ── 解析引擎选择: local | maas ──
 PARSE_ENGINE = os.getenv("PARSE_ENGINE", "local")

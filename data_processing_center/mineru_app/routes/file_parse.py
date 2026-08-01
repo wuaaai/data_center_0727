@@ -1,11 +1,11 @@
 """
 统一文档解析路由 — 接口格式对齐内网 Maas。
 
-POST   /file-parse                   - 提交解析 (对齐 Maas: files + format)
-GET    /file-parse/{task_id}         - 查询状态
-GET    /file-parse/{task_id}/progress - SSE 实时进度
-GET    /file-parse/queue             - 队列状态
-POST   /file-parse/{task_id}/cancel  - 取消任务
+POST   /file_parse                   - 提交解析 (对齐 Maas: files + format)
+GET    /file_parse/{task_id}         - 查询状态
+GET    /file_parse/{task_id}/progress - SSE 实时进度
+GET    /file_parse/queue             - 队列状态
+POST   /file_parse/{task_id}/cancel  - 取消任务
 
 Maas 内网接口格式:
   curl -X POST ".../file_parse" \
@@ -19,7 +19,7 @@ Maas 内网接口格式:
   - 本地 MinerU 的 parse_pdf() 本身就产出 .md 中间文件。
     本接口解析完成后读取 .md 内容作为 markdown 字段返回，
     同时后台继续 build_docx() 流水线生成 DOCX 供下游 rag_ingest.py 切片入库。
-  - 旧路由 POST /api/parse 保留不删，dcp 逐步迁移到 /file-parse。
+  - 旧路由 POST /api/parse 保留不删，dcp 逐步迁移到 /file_parse。
 """
 import os
 import time
@@ -69,7 +69,7 @@ async def progress_events(task_id: str):
 
 # ── 路由 ──
 
-@router.post("/file-parse", summary="统一文档解析入口（对齐 Maas 格式）")
+@router.post("/file_parse", summary="统一文档解析入口（对齐 Maas 格式）")
 async def file_parse(
     files: UploadFile = File(...),
     format: str = Form("markdown"),
@@ -84,7 +84,7 @@ async def file_parse(
     返回格式:
       {"code": 200, "task_id": "...", "status": "queued", "filename": "..."}
 
-    解析完成后可通过 GET /file-parse/{task_id} 获取状态和 markdown 内容。
+    解析完成后可通过 GET /file_parse/{task_id} 获取状态和 markdown 内容。
     """
     ext = Path(files.filename).suffix.lower()
     if ext not in ALLOWED_EXTENSIONS:
@@ -118,7 +118,7 @@ async def file_parse(
     }, status_code=202)
 
 
-@router.get("/file-parse/{task_id}", summary="查询任务状态和结果")
+@router.get("/file_parse/{task_id}", summary="查询任务状态和结果")
 async def get_task(task_id: str):
     """查询解析任务的状态、进度和结果。完成时包含 markdown 内容。"""
     task = model_manager.get_task(task_id)
@@ -156,7 +156,7 @@ async def get_task(task_id: str):
     return response
 
 
-@router.get("/file-parse/{task_id}/progress", summary="SSE 实时进度")
+@router.get("/file_parse/{task_id}/progress", summary="SSE 实时进度")
 async def get_task_progress(task_id: str):
     """通过 Server-Sent Events 推送实时处理进度。"""
     return StreamingResponse(
@@ -166,13 +166,13 @@ async def get_task_progress(task_id: str):
     )
 
 
-@router.get("/file-parse/queue", summary="队列状态")
+@router.get("/file_parse/queue", summary="队列状态")
 async def get_queue():
     """查看模型服务的任务队列状态。"""
     return model_manager.get_status()
 
 
-@router.post("/file-parse/{task_id}/cancel", summary="取消任务")
+@router.post("/file_parse/{task_id}/cancel", summary="取消任务")
 async def cancel_task(task_id: str):
     """取消正在排队或处理中的任务。"""
     ok = model_manager.cancel_task(task_id)

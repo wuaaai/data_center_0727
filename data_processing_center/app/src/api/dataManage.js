@@ -53,8 +53,8 @@ export function ingestRagJob(jobId, body = null) {
   return post(`/ragdata/jobs/${jobId}/ingest`, body || {})
 }
 
-export function unloadRagJob(jobId) {
-  return post(`/ragdata/jobs/${jobId}/unload`)
+export function unloadRagJob(jobId, body = {}) {
+  return post(`/ragdata/jobs/${jobId}/unload`, body)
 }
 
 export function uploadRagFile(formData) {

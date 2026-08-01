@@ -47,7 +47,7 @@ app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 app.mount("/output", StaticFiles(directory=str(OUTPUT_DIR)), name="output")
 
 # 注册路由
-from web_app.routes import upload, jobs, ingest, replace, parse, service  # noqa: E402
+from web_app.routes import upload, jobs, ingest, replace, parse, service, file_parse  # noqa: E402
 
 app.include_router(upload.router)
 app.include_router(jobs.router)
@@ -56,6 +56,7 @@ app.include_router(replace.router)
 # 新增：模型服务 API
 app.include_router(parse.router)
 app.include_router(service.router)
+app.include_router(file_parse.router)
 
 
 @app.get("/")

@@ -54,9 +54,19 @@ router = APIRouter(tags=["知识库数据管理"])
 
 # 最大上传文件数
 _MAX_UPLOAD_FILES = int(os.getenv("MAX_UPLOAD_FILES", "20"))
-_ingestion_lock = threading.Lock()
+# 全局入库锁 → 改为按 KB 隔离，不同知识库可同时入库
+_ingestion_locks: dict[str, threading.Lock] = {}
+_ingestion_lock_global = threading.Lock()  # 保护 _ingestion_locks 字典本身
+
+def _get_kb_lock(kb_id: str) -> threading.Lock:
+    with _ingestion_lock_global:
+        if kb_id not in _ingestion_locks:
+            _ingestion_locks[kb_id] = threading.Lock()
+        return _ingestion_locks[kb_id]
+
 # 专用线程池，避免共享 FastAPI 默认线程池导致高并发时耗尽
-_doc_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="doc-proc")
+_doc_workers = int(os.getenv("DOC_WORKERS", str(MAX_CONCURRENT_DOCS)))
+_doc_executor = ThreadPoolExecutor(max_workers=_doc_workers, thread_name_prefix="doc-proc")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -228,7 +238,7 @@ def _process_document_background(job_id: str, input_path: Path):
             # Maas 返回格式可能不同，简易轮询
             status_url = parse_url.replace("/file_parse", f"/file_parse/{parse_task_id}")
             # 如果 Maas URL 中已有 /file_parse 就直接拼接
-            if "/file-parse/" not in status_url and "/file_parse/" not in status_url:
+            if "/file_parse/" not in status_url:
                 status_url = "/".join(parse_url.rsplit("/", 1)[:-1]) + f"/{parse_task_id}"
 
         while True:
@@ -236,7 +246,7 @@ def _process_document_background(job_id: str, input_path: Path):
                 raise TimeoutError(f"文档处理超时 (>{actual_timeout}秒)")
             time.sleep(3)
             try:
-                # 统一用 /file-parse/{task_id} 查状态
+                # 统一用 /file_parse/{task_id} 查状态
                 req = urllib.request.Request(f"{parse_url}/{parse_task_id}")
                 with urllib.request.urlopen(req, timeout=10) as resp:
                     data = _json.loads(resp.read().decode("utf-8"))
@@ -301,7 +311,7 @@ def _process_document_background(job_id: str, input_path: Path):
                                      progress="任务已取消", progress_pct=0, mineru_task_id=None)
         else:
             state_manager.update_job(job_id, status="failed", error=error_msg,
-                                     progress="处理失败，请查看详情", progress_pct=0, mineru_task_id=None)
+                                     progress="处理失败", progress_pct=0, mineru_task_id=None)
         traceback.print_exc()
 
 
@@ -340,6 +350,14 @@ async def upload_file(request: Request):
     if len(upload_files) > _MAX_UPLOAD_FILES:
         return JSONResponse({"error": f"单次最多上传 {_MAX_UPLOAD_FILES} 个文档，当前 {len(upload_files)} 个"}, status_code=400)
 
+    # 构建文件名索引（每个批次只扫一次 job 列表）
+    _dedup_index = {}
+    for j in state_manager.list_jobs(per_page=10000):
+        fn = j.get("filename", "")
+        if fn not in _dedup_index:
+            _dedup_index[fn] = []
+        _dedup_index[fn].append(j)
+
     for file in upload_files:
         fname = (getattr(file, "filename", None) or "").strip()
         if not fname:
@@ -367,28 +385,23 @@ async def upload_file(request: Request):
             errors.append({"filename": fname, "error": f"文件过大: {_format_size(file_size)}"})
             continue
 
-        # ── 服务端 MD5 去重：禁止活跃任务中同名且同大小的文件重复上传 ──
-        file_md5 = hashlib.md5(content).hexdigest()
-        all_jobs = state_manager.list_jobs(per_page=10000)  # 获取全部任务
-        for j in all_jobs:
-            if j.get("filename") != fname:
-                continue
-            # 同文件名+同文件大小+同 MD5 → 几乎确定是同一份文件
+        # ── 服务端去重：用文件名索引 O(1) 查重，避免 O(n*m) 全表扫 ──
+        dup_jobs = _dedup_index.get(fname, [])
+        blocked = False
+        for j in dup_jobs:
+            # 同文件名+同文件大小 → 几乎确定是同一份文件
             if j.get("file_size") == file_size:
                 status = j.get("status", "")
                 if status in ("processing", "queued", "ingesting", "uploaded"):
                     errors.append({"filename": fname, "error": f"该文件正在处理中（{status}），请等待完成后再上传"})
-                    break
+                    blocked = True; break
                 if status == "completed":
                     errors.append({"filename": fname, "error": f"该文件已处理完成，可直接入库或下载（job: {j['id']}）"})
-                    break
+                    blocked = True; break
                 if status == "ingested":
                     errors.append({"filename": fname, "error": f"该文件已入库，无需重复上传（job: {j['id']}）"})
-                    break
-        else:
-            # 没有匹配的活跃/已完成任务，允许上传
-            pass
-        if errors and errors[-1].get("filename") == fname:
+                    blocked = True; break
+        if blocked:
             continue  # 已被去重拦截，跳过此文件
 
         # 保留原始中文文件名，但用 UUID+.扩展名 保存避免乱码
@@ -440,7 +453,7 @@ async def get_stats():
     for j in all_jobs:
         s = j.get("status", "unknown")
         counts[s] = counts.get(s, 0) + 1
-    return {"total": len(all_jobs), "counts": counts}
+    return {"total": len(all_jobs), "counts": counts, "max_upload_files": _MAX_UPLOAD_FILES, "max_file_size_mb": MAX_FILE_SIZE_MB}
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -883,10 +896,12 @@ async def ingest_job(job_id: str, request: Request = None):
     if not RAG_INGEST_SCRIPT.exists():
         return JSONResponse({"error": f"入库脚本不存在: {RAG_INGEST_SCRIPT}"}, status_code=500)
 
-    if _ingestion_lock.locked():
-        return JSONResponse({"error": "有另一个入库任务正在执行，请等待完成后再试"}, status_code=409)
+    # 按 KB 隔离入库锁，不同 KB 可同时入库
+    _lock_kb = _get_kb_lock(job.get("kb_id", "global"))
+    if _lock_kb.locked():
+        return JSONResponse({"error": f"知识库 '{job.get('kb_id', 'global')}' 正在入库中，请等待完成后再试"}, status_code=409)
 
-    acquired = _ingestion_lock.acquire(blocking=False)
+    acquired = _lock_kb.acquire(blocking=False)
     if not acquired:
         return JSONResponse({"error": "入库任务繁忙"}, status_code=409)
 
@@ -921,9 +936,10 @@ async def ingest_job(job_id: str, request: Request = None):
         kb_id = body_kb.get("kb_id") if "kb_id" in body_kb else job.get("kb_id", "")
         region_code = job.get("region_code", "000000")
         tags = json.dumps(job.get("tags", []), ensure_ascii=False) if isinstance(job.get("tags"), list) else "[]"
+        original_filename = job.get("filename", "")
 
         result = subprocess.run(
-            [mineru_python, str(RAG_INGEST_SCRIPT), str(output_path), job_id, kb_id, region_code, tags],
+            [mineru_python, str(RAG_INGEST_SCRIPT), str(output_path), job_id, kb_id, region_code, tags, original_filename],
             cwd=str(MINERU_BASE),
             capture_output=True,
             text=True, encoding='utf-8', errors='replace',
@@ -971,36 +987,70 @@ async def ingest_job(job_id: str, request: Request = None):
         state_manager.update_job(job_id, status="completed", progress="入库异常", progress_pct=0, ingest_error=str(e))
         return JSONResponse({"error": str(e)}, status_code=500)
     finally:
-        _ingestion_lock.release()
+        _lock_kb.release()
 
 
 @router.post("/jobs/{job_id}/unload", summary="从知识库移除")
-async def unload_job(job_id: str):
-    """从向量库中删除该文件的所有向量切片（同时更新本地 job 状态）。"""
+async def unload_job(job_id: str, request: Request = None):
+    """从向量库删除切片。支持 ?kb_id= 精确移除指定 KB，不传则全部移除。"""
     job = state_manager.get_job(job_id)
     if not job:
         return JSONResponse({"error": "任务不存在"}, status_code=404)
 
-    # 按 source=job_id 删除（与入库脚本 rag_ingest.py 一致）
+    body = {}
+    if request:
+        try: body = await request.json()
+        except: pass
+    kb_id = body.get("kb_id", None)
+
     try:
         engine = create_engine(DB_CONNECTION)
         with engine.connect() as conn:
-            result = conn.execute(
-                text(f"DELETE FROM {DB_TABLE} WHERE {DB_METADATA_COL}->>'source' = :src"),
-                {"src": job_id},
-            )
+            if kb_id:
+                result = conn.execute(
+                    text(f"DELETE FROM {DB_TABLE} WHERE {DB_METADATA_COL}->>'source' = :src AND {DB_METADATA_COL}->>'kb_id' = :kid"),
+                    {"src": job_id, "kid": kb_id},
+                )
+            else:
+                result = conn.execute(
+                    text(f"DELETE FROM {DB_TABLE} WHERE {DB_METADATA_COL}->>'source' = :src"),
+                    {"src": job_id},
+                )
             conn.commit()
             deleted = result.rowcount
         engine.dispose()
 
-        state_manager.update_job(
-            job_id,
-            status="completed",
-            progress="已从知识库移除",
-            progress_pct=100,
-            ingest_error=None,
-        )
-        return {"status": "ok", "message": "已从知识库移除"}
+        # 查剩余切片数：如果还有其他 KB 的切片，保持 ingested 状态
+        remaining = 0
+        try:
+            eng2 = create_engine(DB_CONNECTION)
+            with eng2.connect() as c2:
+                rr = c2.execute(
+                    text(f"SELECT COUNT(*) FROM {DB_TABLE} WHERE {DB_METADATA_COL}->>'source' = :src"),
+                    {"src": job_id},
+                ).fetchone()
+                remaining = rr[0] if rr else 0
+            eng2.dispose()
+        except Exception:
+            pass
+
+        if kb_id and remaining > 0:
+            state_manager.update_job(
+                job_id,
+                status="ingested",
+                progress=f"已从 {kb_id} 移除（还存在于其他知识库）",
+                progress_pct=100,
+            )
+            return {"status": "ok", "message": f"已从 {kb_id} 移除，剩余 {remaining} 条切片"}
+        else:
+            state_manager.update_job(
+                job_id,
+                status="completed",
+                progress="已从知识库移除",
+                progress_pct=100,
+                ingest_error=None,
+            )
+            return {"status": "ok", "message": "已从知识库移除"}
 
     except Exception as e:
         traceback.print_exc()
@@ -1016,10 +1066,11 @@ async def ingest_batch(request: Request):
     if not job_ids:
         return JSONResponse({"error": "未提供 job_ids"}, status_code=400)
 
-    if _ingestion_lock.locked():
+    # 批量入库也用全局锁防止多批次冲突
+    if _ingestion_lock_global.locked():
         return JSONResponse({"error": "有另一个入库任务正在执行"}, status_code=409)
 
-    acquired = _ingestion_lock.acquire(blocking=False)
+    acquired = _ingestion_lock_global.acquire(blocking=False)
     if not acquired:
         return JSONResponse({"error": "入库任务繁忙"}, status_code=409)
 
@@ -1058,9 +1109,10 @@ async def ingest_batch(request: Request):
                 kb_id = job.get("kb_id", "default")
                 region_code = job.get("region_code", "000000")
                 tags = json.dumps(job.get("tags", []), ensure_ascii=False) if isinstance(job.get("tags"), list) else "[]"
+                orig_fn = job.get("filename", "")
 
                 result = subprocess.run(
-                    [mineru_python, str(RAG_INGEST_SCRIPT), str(output_path), job_id, kb_id, region_code, tags],
+                    [mineru_python, str(RAG_INGEST_SCRIPT), str(output_path), job_id, kb_id, region_code, tags, orig_fn],
                     cwd=str(MINERU_BASE),
                     capture_output=True,
                     text=True, encoding='utf-8', errors='replace',
@@ -1085,7 +1137,7 @@ async def ingest_batch(request: Request):
                 results.append({"job_id": job_id, "status": "failed", "error": str(e)})
 
     finally:
-        _ingestion_lock.release()
+        _lock_kb.release()
 
     ok_count = sum(1 for r in results if r["status"] == "ok")
     return JSONResponse({"results": results, "ok": ok_count, "total": len(results)})
@@ -1273,7 +1325,21 @@ async def list_knowledge_bases(is_active: bool = None):
             except Exception:
                 kb["document_count"] = 0
                 kb["chunk_count"] = 0
-        return {"kbs": kbs, "total": len(kbs)}
+        # 补充文档池统计
+        pool_docs = pool_chunks = 0
+        try:
+            eng3 = create_engine(DB_CONNECTION)
+            with eng3.connect() as c3:
+                pr = c3.execute(
+                    text(f"SELECT COUNT(DISTINCT {DB_METADATA_COL}->>'source'), COUNT(*) FROM {DB_TABLE} "
+                         f"WHERE {DB_METADATA_COL}->>'kb_id' IS NULL OR {DB_METADATA_COL}->>'kb_id' = ''")
+                ).fetchone()
+                pool_docs = pr[0] if pr else 0
+                pool_chunks = pr[1] if pr else 0
+            eng3.dispose()
+        except Exception:
+            pass
+        return {"kbs": kbs, "total": len(kbs), "pool_document_count": pool_docs, "pool_chunk_count": pool_chunks}
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
@@ -1699,3 +1765,5 @@ async def update_document_metadata(source: str, request: Request):
 #   - 其他市只看 c_metadata->>'region_code' = 本市的
 #   - 管理界面 (knowledge/stats/jobs) 不做过滤，所有用户可见全部
 # ═══════════════════════════════════════════════════════════════
+
+
