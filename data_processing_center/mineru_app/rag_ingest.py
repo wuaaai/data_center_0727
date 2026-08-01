@@ -166,8 +166,59 @@ def read_and_process_word(file_path, source_id=None, original_filename=None,
         return []
 
 
+def read_and_process_markdown(markdown_text, source_id=None, original_filename=None,
+                              kb_id="default", region_code="000000", tags=None):
+    """处理内网 Maas 返回的纯 markdown 文本，按 # 一级标题分片。
+
+    内网 markdown 无 <--split--> / *** 分片标记，用 "# " 标题分章。
+    图片相对路径 (images/xxx.jpg) 在切片中保留为纯文本，不额外下载。
+    """
+    docs_to_save = []
+    # 按 "# " 一级标题分片
+    sections = []  # [(title, text)]
+    current_title = ""
+    current_lines = []
+    for line in markdown_text.split("\n"):
+        stripped = line.strip()
+        if stripped.startswith("# "):
+            if current_title or any(l.strip() for l in current_lines):
+                sections.append((current_title, "\n".join(current_lines)))
+            current_title = stripped[2:].strip()
+            current_lines = []
+        else:
+            current_lines.append(line)
+    if current_title or any(l.strip() for l in current_lines):
+        sections.append((current_title, "\n".join(current_lines)))
+
+    display_name = original_filename or source_id or "未命名文档"
+    for idx, (title, content) in enumerate(sections):
+        content = content.strip()
+        if not content:
+            continue
+        parent_title = f"文档名：{display_name}"
+        if title:
+            parent_title += f"\n{title}"
+        content_to_vectorize = f"{parent_title}\n{content}"
+        metadata = {
+            "source": source_id,
+            "filename": display_name,
+            "type": "child_chunk",
+            "recall_context": content,
+            "chunk_id": f"{display_name}_md_{idx}",
+            "region_code": region_code,
+            "created_at": time.time(),
+            "kb_id": kb_id if kb_id is not None else "default",
+            "enabled": True,
+            "tags": tags or [],
+        }
+        new_doc = Document(page_content=content_to_vectorize, metadata=metadata)
+        docs_to_save.append(new_doc)
+    print(f"  - {display_name}: markdown 分片生成 {len(docs_to_save)} 个切片")
+    return docs_to_save
+
+
 # ---------- 入库 ----------
-def ingest(file_path, source_id=None, kb_id="default", region_code="000000", tags=None, original_filename_from_cli=None):
+def ingest(file_path, source_id=None, kb_id="default", region_code="000000", tags=None, original_filename_from_cli=None, markdown_text=None):
     if not os.path.exists(file_path):
         print(f"文件不存在: {file_path}")
         return
@@ -228,9 +279,14 @@ def ingest(file_path, source_id=None, kb_id="default", region_code="000000", tag
         conn.rollback()
         print(f"清理旧切片跳过: {e}")
 
-    docs = read_and_process_word(file_path, source_id=source_id, original_filename=original_filename,
-                                 kb_id=kb_id, region_code=region_code, tags=tags)
-    print(f"  - {file_name}: 生成 {len(docs)} 个切片")
+    # markdown 优先（内网 Maas 同步返回的纯文本），否则用 DOCX 文件
+    if markdown_text:
+        docs = read_and_process_markdown(markdown_text, source_id=source_id, original_filename=original_filename,
+                                         kb_id=kb_id, region_code=region_code, tags=tags)
+    else:
+        docs = read_and_process_word(file_path, source_id=source_id, original_filename=original_filename,
+                                     kb_id=kb_id, region_code=region_code, tags=tags)
+        print(f"  - {file_name}: 生成 {len(docs)} 个切片")
 
     if docs:
         print(f"正在写入 {len(docs)} 个切片到PostgreSQL数据库...")
@@ -266,8 +322,8 @@ def ingest(file_path, source_id=None, kb_id="default", region_code="000000", tag
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("用法: python rag_ingest.py <file_path> <source_id> [kb_id] [region_code] [tags_json] [original_filename]")
-        print("示例: python rag_ingest.py D:/path/to/file.docx abc123 kb_budget 1301000 '[\"预算\",\"2026\"]' '原文件名.docx'")
+        print("用法: python rag_ingest.py <file_path> <source_id> [kb_id] [region_code] [tags_json] [original_filename] [markdown_file]")
+        print("示例: python rag_ingest.py D:/path/to/file.docx abc123 kb_budget 1301000 '[\"预算\",\"2026\"]' '原文件名.docx' D:/markdown.md")
         sys.exit(1)
     src_id = sys.argv[2] if len(sys.argv) > 2 else None
     kb_id = sys.argv[3] if len(sys.argv) > 3 else "default"
@@ -281,4 +337,13 @@ if __name__ == "__main__":
             tags = None
     # 第6个参数：原始文件名（直接从后端传入，比查 _jobs.json 更可靠）
     original_filename_from_cli = sys.argv[6] if len(sys.argv) > 6 else None
-    ingest(sys.argv[1], source_id=src_id, kb_id=kb_id, region_code=region_code, tags=tags, original_filename_from_cli=original_filename_from_cli)
+    # 第7个参数：markdown 文件路径（内网 Maas 同步返回的纯文本，存入临时文件）
+    markdown_text = None
+    if len(sys.argv) > 7 and sys.argv[7]:
+        try:
+            with open(sys.argv[7], "r", encoding="utf-8") as f:
+                markdown_text = f.read()
+        except Exception as e:
+            print(f"读取 markdown 文件失败: {e}")
+    ingest(sys.argv[1], source_id=src_id, kb_id=kb_id, region_code=region_code, tags=tags,
+           original_filename_from_cli=original_filename_from_cli, markdown_text=markdown_text)

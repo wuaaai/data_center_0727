@@ -222,9 +222,33 @@ def _process_document_background(job_id: str, input_path: Path):
 
         resp_data = _submit_to_parser(file_bytes, file_name, parse_url, is_maas=is_maas)
 
+        # Maas 模式: 同步接口，一次调用直接返回完整 markdown，无需轮询
+        if is_maas:
+            markdown = ""
+            # 内网返回格式: {"backend":..., "results": {"文件名": {"md_content": "..."}}}
+            results = resp_data.get("results") or {}
+            for fname, fdata in results.items():
+                md = (fdata or {}).get("md_content") or ""
+                if md:
+                    markdown = md
+                    break
+            if not markdown:
+                # 兼容其他可能的字段名
+                markdown = resp_data.get("md_content") or resp_data.get("markdown") or ""
+
+            elapsed = time.perf_counter() - t_start
+            preview_text = markdown[:5000] if markdown else "（无文本内容）"
+            state_manager.update_job(
+                job_id, status="completed",
+                markdown=markdown,
+                progress="处理完成", preview_text=preview_text,
+                processing_time=round(elapsed, 1), progress_pct=100,
+            )
+            return
+
         parse_task_id = resp_data.get("task_id", "")
         state_manager.update_job(job_id, status="processing",
-                                 progress=f"[准备中] 已发送文档，{'Maas' if is_maas else '本地'}引擎处理中...",
+                                 progress=f"[准备中] 已发送文档，本地引擎处理中...",
                                  mineru_task_id=parse_task_id, progress_pct=5)
 
         # 轮询等待完成
@@ -729,6 +753,11 @@ async def list_jobs(status: str = None, page: int = 1, per_page: int = 20):
         for j in jobs:
             if "region_name" not in j:
                 j["region_name"] = j.get("region_code", "未设置")
+    # 列表接口不返回完整 markdown（大字段），仅保留是否有 markdown 的标记
+    for j in jobs:
+        if "markdown" in j:
+            j["has_markdown"] = bool(j["markdown"])
+            del j["markdown"]
     return {"jobs": jobs, "total": total}
 
 
@@ -880,18 +909,21 @@ async def batch_download(request: Request):
 
 @router.post("/jobs/{job_id}/ingest", summary="入库到向量知识库")
 async def ingest_job(job_id: str, request: Request = None):
-    """将处理后的 DOCX 导入 pgvector 知识库。支持 Request body 传入 kb_id 覆盖 job 默认值。"""
+    """将处理后的 DOCX 或 markdown 导入 pgvector 知识库。支持 Request body 传入 kb_id 覆盖 job 默认值。"""
     job = state_manager.get_job(job_id)
     if not job:
         return JSONResponse({"error": "任务不存在"}, status_code=404)
     if job["status"] not in ("completed", "ingested"):
         return JSONResponse({"error": f"任务状态为 {job['status']}，无法入库"}, status_code=400)
-    if not job.get("output_path"):
-        return JSONResponse({"error": "输出文件不存在"}, status_code=400)
 
-    output_path = Path(job["output_path"])
-    if not output_path.exists():
-        return JSONResponse({"error": f"输出文件已被清理: {output_path}"}, status_code=404)
+    # markdown 模式（内网 Maas 同步返回）不需要 DOCX output_path
+    markdown_text = job.get("markdown", "")
+    if not markdown_text:
+        if not job.get("output_path"):
+            return JSONResponse({"error": "输出文件不存在"}, status_code=400)
+        output_path = Path(job["output_path"])
+        if not output_path.exists():
+            return JSONResponse({"error": f"输出文件已被清理: {output_path}"}, status_code=404)
 
     if not RAG_INGEST_SCRIPT.exists():
         return JSONResponse({"error": f"入库脚本不存在: {RAG_INGEST_SCRIPT}"}, status_code=500)
@@ -938,8 +970,17 @@ async def ingest_job(job_id: str, request: Request = None):
         tags = json.dumps(job.get("tags", []), ensure_ascii=False) if isinstance(job.get("tags"), list) else "[]"
         original_filename = job.get("filename", "")
 
+        # markdown 模式: 写入临时文件作为输入源，同时传给 rag_ingest.py 第7参数
+        md_file_arg = ""
+        if markdown_text:
+            md_tmp = OUTPUT_DIR / job_id / "_maas_markdown.md"
+            md_tmp.parent.mkdir(parents=True, exist_ok=True)
+            md_tmp.write_text(markdown_text, encoding="utf-8")
+            md_file_arg = str(md_tmp)
+            output_path = md_tmp  # markdown 模式下用它作为 file_path 占位（rag_ingest 检查存在性）
+
         result = subprocess.run(
-            [mineru_python, str(RAG_INGEST_SCRIPT), str(output_path), job_id, kb_id, region_code, tags, original_filename],
+            [mineru_python, str(RAG_INGEST_SCRIPT), str(output_path), job_id, kb_id, region_code, tags, original_filename, md_file_arg],
             cwd=str(MINERU_BASE),
             capture_output=True,
             text=True, encoding='utf-8', errors='replace',

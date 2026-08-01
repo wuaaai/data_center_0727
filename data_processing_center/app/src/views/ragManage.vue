@@ -558,7 +558,7 @@ onMounted(async () => {
           <el-table-column label="操作" width="220" align="center" fixed="right">
             <template #default="{row}"><div class="action-btns">
               <el-button v-if="row.status==='completed'||row.status==='ingested'" type="info" link size="small" @click="showPreview(row)"><el-icon><View/></el-icon></el-button>
-              <el-button v-if="row.status==='completed'||row.status==='ingested'" type="primary" link size="small" @click="downloadRagJob(row.id)"><el-icon><Download/></el-icon></el-button>
+              <el-button v-if="(row.status==='completed'||row.status==='ingested')&&row.output_path" type="primary" link size="small" @click="downloadRagJob(row.id)"><el-icon><Download/></el-icon></el-button>
               <el-button v-if="row.status==='completed'" type="success" link size="small" @click="openIngestDialog(row)"><el-icon><Check/></el-icon></el-button>
               <el-button v-if="row.status==='ingested'" type="warning" link size="small" @click="openUnloadDialog(row)"><el-icon><Close/></el-icon></el-button>
               <el-button type="danger" link size="small" @click="handleDelete(row)"><el-icon><Delete/></el-icon></el-button>
