@@ -234,7 +234,7 @@ function renderChunks(chunks) {
   box.innerHTML = chunks.map(c => `
     <div class="chunk">
       <div class="chunk-title">${c.chunk_id || ''} · ${escapeHtml(c.title || '')}</div>
-      <div class="chunk-meta">估算 token: ${c.token_estimate || '-'}</div>
+      <div class="chunk-meta">估算 token: ${c.token_estimate || '-'}${c.parent_id ? ' | 父块: ' + escapeHtml(c.parent_id) : ''}</div>
       <div class="chunk-content">${escapeHtml(c.content || '')}</div>
     </div>`).join('');
 }
@@ -331,10 +331,12 @@ def file_parse(
         content = files.file.read()
         filename, _path = _save_upload(files, content)
         with _parse_lock:
-            md_content = parser.parse_pdf_to_markdown(content, filename)
+            result = parser.parse_pdf(content, filename)
+        md_content = result.get("md_content", "")
         if not md_content:
             return JSONResponse({"code": 500, "error": "解析结果为空"}, status_code=500)
-        _save_history(filename, md_content, chunker.chunk_markdown(md_content, filename))
+        chunks = _get_chunks(result, filename)
+        _save_history(filename, md_content, chunks)
         return _build_response(filename, md_content, with_chunks=False)
     except ValueError as e:
         return JSONResponse({"code": 400, "error": str(e)}, status_code=400)
@@ -342,6 +344,11 @@ def file_parse(
         import traceback
         traceback.print_exc()
         return JSONResponse({"code": 500, "error": str(e)}, status_code=500)
+
+
+def _get_chunks(parse_result: dict, filename: str) -> list:
+    """对 MinerU 输出的 markdown 文本直接分块（统一方案）。"""
+    return chunker.chunk_markdown(parse_result.get("md_content", ""), filename)
 
 
 @app.post("/file_parse/chunk")
@@ -354,10 +361,12 @@ def file_parse_chunk(
         content = files.file.read()
         filename, _path = _save_upload(files, content)
         with _parse_lock:
-            md_content = parser.parse_pdf_to_markdown(content, filename)
+            result = parser.parse_pdf(content, filename)
+        md_content = result.get("md_content", "")
         if not md_content:
             return JSONResponse({"code": 500, "error": "解析结果为空"}, status_code=500)
-        _save_history(filename, md_content, chunker.chunk_markdown(md_content, filename))
+        chunks = _get_chunks(result, filename)
+        _save_history(filename, md_content, chunks)
         return _build_response(filename, md_content, with_chunks=True)
     except ValueError as e:
         return JSONResponse({"code": 400, "error": str(e)}, status_code=400)

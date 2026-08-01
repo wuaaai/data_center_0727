@@ -66,8 +66,8 @@ def model_status() -> dict:
     }
 
 
-def parse_pdf_to_markdown(pdf_bytes: bytes, filename: str, output_dir: Path = None) -> str:
-    """解析 PDF 字节为 markdown 文本。
+def parse_pdf(pdf_bytes: bytes, filename: str, output_dir: Path = None) -> dict:
+    """解析 PDF 字节，返回 markdown 文本。
 
     参数:
         pdf_bytes: PDF 文件内容（字节）
@@ -75,7 +75,7 @@ def parse_pdf_to_markdown(pdf_bytes: bytes, filename: str, output_dir: Path = No
         output_dir: 输出目录（默认 config.OUTPUT_DIR 下的随机子目录）
 
     返回:
-        markdown 文本字符串；解析失败抛异常。
+        {"md_content": str, "stem": str, "parse_dir": str}
     """
     from mineru.cli.common import do_parse
 
@@ -105,7 +105,18 @@ def parse_pdf_to_markdown(pdf_bytes: bytes, filename: str, output_dir: Path = No
         end_page_id=config.END_PAGE_ID,
     )
 
-    return _read_markdown_from_dir(out_dir, stem)
+    md_content = _read_markdown_from_dir(out_dir, stem)
+
+    return {
+        "md_content": md_content,
+        "stem": stem,
+        "parse_dir": str(out_dir / stem),
+    }
+
+
+def parse_pdf_to_markdown(pdf_bytes: bytes, filename: str, output_dir: Path = None) -> str:
+    """兼容入口：解析 PDF 只返回 markdown 文本。"""
+    return parse_pdf(pdf_bytes, filename, output_dir)["md_content"]
 
 
 def _read_markdown_from_dir(out_dir: Path, stem: str) -> str:

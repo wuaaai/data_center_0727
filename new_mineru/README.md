@@ -58,11 +58,15 @@ python main.py C:/path/test.pdf --chunk   # 打印 markdown + 分块
 python main.py C:/path/test.pdf -o out.md # markdown 存文件
 ```
 
-## 分块说明
+## 分块说明（父子召回策略）
 
-- 按 `# ` 一级标题分章，超长章节按段落切成 ≤600 字符子块
-- 保证每块在 rerank 模型 512 token 上限内
-- 图片相对路径 `images/xxx.jpg` 保留为纯文本
+- **统一对 MinerU 输出的 markdown 文本分块**（不依赖 content_list，内网只有 markdown 也适用）
+- 按 `# ` 一级标题分章节 = **父块**（recall_context，召回时的完整上下文）
+- 章节内按段落切 **子块**（content，向量 embedding 用）
+- 每个子块输出：`{chunk_id, parent_id, title, content, recall_context, token_estimate}`
+- 子块 ≤600 字符，保证 rerank 512 token 上限内
+
+父子召回：检索命中子块（精确），返回父块完整内容（上下文），与 data_processing_center 入库逻辑一致。
 
 ## 配置（config.py 或环境变量）
 

@@ -39,7 +39,8 @@ def main():
 
     print(f"解析: {file_path.name} ...")
     content = file_path.read_bytes()
-    md = parser.parse_pdf_to_markdown(content, file_path.name)
+    result = parser.parse_pdf(content, file_path.name)
+    md = result.get("md_content", "")
     if not md:
         print("解析结果为空")
         sys.exit(1)
@@ -52,8 +53,9 @@ def main():
         print(f"\nmarkdown 已保存: {args.output}")
 
     if args.chunk:
-        print(f"\n=== 分块结果（共 {len(chunker.chunk_markdown(md, file_path.name))} 块）===")
+        # 对 MinerU 输出的 markdown 文本直接分块
         chunks = chunker.chunk_markdown(md, file_path.name)
+        print(f"\n=== 分块结果（markdown 分块，共 {len(chunks)} 块）===")
         for c in chunks:
             print(f"\n[{c['chunk_id']}] 标题: {c['title']} | 估算token: {c['token_estimate']}")
             print(f"  内容: {c['content'][:120]}...")
