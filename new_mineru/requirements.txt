@@ -1,0 +1,5 @@
+# new_mineru 独立解析服务依赖
+mineru[pipeline]>=3.2.0
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+python-multipart>=0.0.9

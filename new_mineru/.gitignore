@@ -1,0 +1,7 @@
+# 运行产物（不应提交）
+output/
+uploads/
+history/
+__pycache__/
+*.pyc
+.venv/
