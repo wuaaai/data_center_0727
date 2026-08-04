@@ -31,16 +31,20 @@ def main():
         print(f"文件不存在: {file_path}")
         sys.exit(1)
 
-    print(f"加载模型...")
-    if not parser.load_model(blocking=True):
-        print(f"模型加载失败: {parser.model_status().get('model_error')}")
-        sys.exit(1)
-    print("模型就绪 [OK]")
+    print(f"解析引擎: {config.PARSE_ENGINE}")
+    if config.PARSE_ENGINE != "maas":
+        # local 模式才需要加载本地 MinerU 模型
+        print(f"加载模型...")
+        if not parser.load_model(blocking=True):
+            print(f"模型加载失败: {parser.model_status().get('model_error')}")
+            sys.exit(1)
+        print("模型就绪 [OK]")
 
     print(f"解析: {file_path.name} ...")
     content = file_path.read_bytes()
     result = parser.parse_pdf(content, file_path.name)
     md = result.get("md_content", "")
+    print(f"图片保存: {result.get('images_saved', 0)} 张")
     if not md:
         print("解析结果为空")
         sys.exit(1)
@@ -53,9 +57,13 @@ def main():
         print(f"\nmarkdown 已保存: {args.output}")
 
     if args.chunk:
-        # 对 MinerU 输出的 markdown 文本直接分块
-        chunks = chunker.chunk_markdown(md, file_path.name)
-        print(f"\n=== 分块结果（markdown 分块，共 {len(chunks)} 块）===")
+        # content_list 优先分块，否则 markdown 兜底
+        if result.get("content_list"):
+            chunks = chunker.chunk_content_list(result["content_list"], result.get("stem", ""))
+            print(f"\n=== 分块结果（content_list 分块，共 {len(chunks)} 块）===")
+        else:
+            chunks = chunker.chunk_markdown(md, file_path.name)
+            print(f"\n=== 分块结果（markdown 分块，共 {len(chunks)} 块）===")
         for c in chunks:
             print(f"\n[{c['chunk_id']}] 标题: {c['title']} | 估算token: {c['token_estimate']}")
             print(f"  内容: {c['content'][:120]}...")

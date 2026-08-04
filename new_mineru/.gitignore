@@ -2,6 +2,7 @@
 output/
 uploads/
 history/
+static/images/
 __pycache__/
 *.pyc
 .venv/

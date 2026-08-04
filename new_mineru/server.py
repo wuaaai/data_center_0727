@@ -15,12 +15,17 @@ from pathlib import Path
 
 from fastapi import FastAPI, File, Form, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 import config
 import parser
 import chunker
 
 app = FastAPI(title="new_mineru 独立解析服务", version=config.VERSION)
+
+# 图片静态服务（前端读取解析出的图片，URL 形如 /static/images/xxx.jpg）
+config.IMAGE_DIR.mkdir(parents=True, exist_ok=True)
+app.mount("/static", StaticFiles(directory=str(config.PROJECT_ROOT / "static")), name="static")
 
 # 全局解析锁：MinerU 模型单例只能串行使用，避免并发解析冲突
 _parse_lock = threading.Lock()
@@ -347,7 +352,14 @@ def file_parse(
 
 
 def _get_chunks(parse_result: dict, filename: str) -> list:
-    """对 MinerU 输出的 markdown 文本直接分块（统一方案）。"""
+    """分块：content_list 优先（结构化父子分块），否则 markdown 兜底。"""
+    content_list = parse_result.get("content_list")
+    stem = parse_result.get("stem", "")
+    if content_list:
+        try:
+            return chunker.chunk_content_list(content_list, stem or filename)
+        except Exception as e:
+            print(f"[chunk] content_list 分块失败，回退 markdown: {e}")
     return chunker.chunk_markdown(parse_result.get("md_content", ""), filename)
 
 
